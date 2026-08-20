@@ -44,6 +44,7 @@ vi.mock("../state/session", () => ({
 import {
   awaitAttachmentUploads,
   getUploadedAttachments,
+  handoffAttachmentUploads,
   readAttachmentUpload,
   releaseAttachmentUpload,
   releaseDraftAttachment,
@@ -256,6 +257,27 @@ describe("attachmentUploadQueue", () => {
         sizeBytes: 3,
       },
     ]);
+  });
+
+  it("hands completed uploads to the desktop queue without deleting them", async () => {
+    const file = makeFile("queued-report");
+    startAttachmentUpload({ environmentId: firstEnvironment, image: file });
+    await Promise.resolve();
+
+    const settled = awaitAttachmentUploads([file.id]);
+    TestXmlHttpRequest.requests[0]!.complete();
+    await settled;
+    mocks.runAtomCommand.mockClear();
+
+    handoffAttachmentUploads([file]);
+
+    expect(readAttachmentUpload(file.id)).toBeUndefined();
+    expect(mocks.runAtomCommand).not.toHaveBeenCalledWith(
+      expect.anything(),
+      mocks.removeUpload,
+      expect.anything(),
+      expect.anything(),
+    );
   });
 
   it("uses the fallback MIME type for both the upload claim and request header", async () => {

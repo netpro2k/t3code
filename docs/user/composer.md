@@ -112,3 +112,9 @@ On desktop, press `Cmd+Enter` on macOS or `Ctrl+Enter` on Windows and Linux from
 start it in the background. T3 Code opens another new thread and shows an **Open** action for the
 thread that started. The new thread keeps the selected workspace mode and base branch. If **New
 worktree** is selected, each background thread creates its own worktree.
+
+Sending from the desktop app while a turn is already running queues the message instead of
+interrupting. Queued messages appear above the composer and send in order when the current turn
+finishes. Drag to reorder, delete a message, retry if sending failed, or steer a queued message into
+the active turn. The queue is saved on this computer, so it survives reloading the desktop app. Web
+and mobile clients do not queue this way.

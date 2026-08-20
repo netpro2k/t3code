@@ -201,7 +201,7 @@ import {
   nextProjectScriptId,
   projectScriptIdFromCommand,
 } from "~/projectScripts";
-import { newDraftId, newMessageId, newThreadId } from "~/lib/utils";
+import { newCommandId, newDraftId, newMessageId, newThreadId } from "~/lib/utils";
 import { useBrowserHistoryStore } from "~/browserHistoryStore";
 import { registerFaviconProjectForThread } from "~/browserFaviconStore";
 import { getProviderModelCapabilities, resolveSelectableProvider } from "../providerModels";
@@ -215,6 +215,11 @@ import {
   useClientSettingsHydrated,
   useEnvironmentSettings,
 } from "../hooks/useSettings";
+import {
+  desktopMessageQueueKey,
+  EMPTY_DESKTOP_MESSAGE_QUEUE,
+  useDesktopMessageQueueStore,
+} from "../desktopMessageQueue";
 import { useNowMinute } from "../hooks/useNowMinute";
 import { useNewThreadHandler } from "../hooks/useHandleNewThread";
 import { useThreadActions } from "../hooks/useThreadActions";
@@ -288,6 +293,7 @@ import {
 } from "../state/entities";
 import { environmentShell } from "../state/shell";
 import { ChatComposer, type ChatComposerHandle } from "./chat/ChatComposer";
+import { DesktopQueuedMessages } from "./chat/DesktopQueuedMessages";
 import { DraftHeroHeadline } from "./chat/DraftHeroHeadline";
 import { ExpandedImageDialog } from "./chat/ExpandedImageDialog";
 import { PullRequestThreadDialog } from "./PullRequestThreadDialog";
@@ -385,6 +391,7 @@ import { useComposerHandleContext } from "../composerHandleContext";
 import {
   awaitAttachmentUploads,
   getUploadedAttachments,
+  handoffAttachmentUploads,
   releaseDraftAttachments,
   startAttachmentUpload,
 } from "../lib/attachmentUploadQueue";
@@ -1394,6 +1401,11 @@ function ChatViewContent(props: ChatViewProps) {
   }, [routeKind, routeThreadRef, routeThreadState]);
   const markThreadVisited = useUiStateStore((store) => store.markThreadVisited);
   const settings = useEnvironmentSettings(environmentId);
+  const activeDesktopMessageQueue = useDesktopMessageQueueStore(
+    (state) =>
+      state.queuesByThreadKey[desktopMessageQueueKey(environmentId, props.threadId)] ??
+      EMPTY_DESKTOP_MESSAGE_QUEUE,
+  );
   // New-thread defaults live in the primary environment's settings.json (the
   // settings UI never writes to remote environments), so read them from the
   // primary server rather than the thread's environment.
@@ -5615,9 +5627,17 @@ function ChatViewContent(props: ChatViewProps) {
         }),
       );
     };
+    const shouldQueueCurrentMessage =
+      isElectron &&
+      isServerThread &&
+      activeThread !== undefined &&
+      (phase === "running" ||
+        activeThread.session?.status === "starting" ||
+        activeDesktopMessageQueue.length > 0 ||
+        isSendBusy);
     if (
       !activeThread ||
-      isSendBusy ||
+      (isSendBusy && !shouldQueueCurrentMessage) ||
       isConnecting ||
       threadDetailLoading ||
       sendInFlightRef.current ||
@@ -5975,6 +5995,91 @@ function ChatViewContent(props: ChatViewProps) {
       }
     }
 
+    const resolveComposerAttachments = () =>
+      Promise.all(
+        composerAttachmentsSnapshot.map(async (attachment) => {
+          if (turnUsesAttachmentUploads) {
+            const uploaded = getUploadedAttachments({ environmentId, images: [attachment] })?.[0];
+            if (!uploaded) {
+              throw new Error(`Attachment '${attachment.name}' did not finish uploading.`);
+            }
+            return uploaded;
+          }
+          if (attachment.type !== "image") {
+            throw new Error("This server does not support file attachments.");
+          }
+          return {
+            type: "image" as const,
+            name: attachment.name,
+            mimeType: attachment.mimeType,
+            sizeBytes: attachment.sizeBytes,
+            dataUrl: await readFileAsDataUrl(attachment.file),
+          };
+        }),
+      );
+
+    if (shouldQueueCurrentMessage) {
+      const attachmentsResult = await settlePromise(resolveComposerAttachments);
+      if (attachmentsResult._tag === "Failure") {
+        const error = squashAtomCommandFailure(attachmentsResult);
+        setThreadError(
+          threadIdForSend,
+          error instanceof Error ? error.message : "Failed to prepare the queued message.",
+        );
+        sendInFlightRef.current = false;
+        return;
+      }
+
+      const messageId = newMessageId();
+      const createdAt = new Date().toISOString();
+      const { durable } = useDesktopMessageQueueStore.getState().enqueue({
+        environmentId,
+        threadId: threadIdForSend,
+        messageId,
+        commandId: newCommandId(),
+        text: outgoingMessageText,
+        displayText: messageTextForSend,
+        attachments: attachmentsResult.value,
+        modelSelection: ctxSelectedModelSelection,
+        runtimeMode,
+        interactionMode,
+        titleSeed: truncate(trimmed || activeThread.title || "Queued message"),
+        createdAt,
+      });
+      promptRef.current = "";
+      clearComposerDraftContent(composerDraftTarget);
+      if (turnUsesAttachmentUploads) {
+        handoffAttachmentUploads(composerAttachmentsSnapshot);
+      }
+      composerRef.current?.resetCursorState();
+      setThreadError(threadIdForSend, null);
+      if (expiredTerminalContextCount > 0) {
+        const toastCopy = buildExpiredTerminalContextToastCopy(
+          expiredTerminalContextCount,
+          "omitted",
+        );
+        toastManager.add(
+          stackedThreadToast({
+            type: "warning",
+            title: toastCopy.title,
+            description: toastCopy.description,
+          }),
+        );
+      }
+      if (!durable) {
+        toastManager.add(
+          stackedThreadToast({
+            type: "warning",
+            title: "Message queued for this session",
+            description: "Desktop storage could not persist it, so it will not survive a reload.",
+          }),
+        );
+      }
+      for (const image of composerImagesSnapshot) revokeBlobPreviewUrl(image.previewUrl);
+      sendInFlightRef.current = false;
+      return;
+    }
+
     const resolvedSubmissionIntent =
       submissionIntent === "background" && isLocalDraftThread ? "background" : "foreground";
     if (
@@ -6016,27 +6121,7 @@ function ChatViewContent(props: ChatViewProps) {
 
     const messageIdForSend = newMessageId();
     const messageCreatedAt = new Date().toISOString();
-    const turnAttachmentsPromise = Promise.all(
-      composerAttachmentsSnapshot.map(async (attachment) => {
-        if (turnUsesAttachmentUploads) {
-          const uploaded = getUploadedAttachments({ environmentId, images: [attachment] })?.[0];
-          if (!uploaded) {
-            throw new Error(`Attachment '${attachment.name}' did not finish uploading.`);
-          }
-          return uploaded;
-        }
-        if (attachment.type !== "image") {
-          throw new Error("This server does not support file attachments.");
-        }
-        return {
-          type: "image" as const,
-          name: attachment.name,
-          mimeType: attachment.mimeType,
-          sizeBytes: attachment.sizeBytes,
-          dataUrl: await readFileAsDataUrl(attachment.file),
-        };
-      }),
-    );
+    const turnAttachmentsPromise = resolveComposerAttachments();
     const optimisticAttachments = composerAttachmentsSnapshot.map((attachment) =>
       attachment.type === "image"
         ? {
@@ -7383,6 +7468,14 @@ function ChatViewContent(props: ChatViewProps) {
                     }
                   >
                     <ComposerSurface.Shell contextStrip={showComposerContextStrip}>
+                      {isElectron && isServerThread && activeThread ? (
+                        <DesktopQueuedMessages
+                          environmentId={environmentId}
+                          threadId={activeThread.id}
+                          phase={phase}
+                          isSendBusy={isSendBusy}
+                        />
+                      ) : null}
                       <ComposerSurface.Host>
                         <div ref={attachDraftHeroComposerAnchorRef} className="relative z-10">
                           <ChatComposer

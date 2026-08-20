@@ -479,6 +479,22 @@ export function releaseAttachmentUpload(imageId: string): void {
   clearUploadState(imageId);
 }
 
+/**
+ * Transfers ownership of completed pending uploads from the composer to the
+ * desktop message queue. The queue keeps the server attachment ids and must
+ * not delete the bytes while the message is waiting to send.
+ */
+export function handoffAttachmentUploads(
+  attachments: ReadonlyArray<ComposerImageAttachment | ComposerFileAttachment>,
+): void {
+  for (const attachment of attachments) {
+    const upload = readAttachmentUpload(attachment.id);
+    if (upload?.status === "ready") {
+      clearUploadState(attachment.id);
+    }
+  }
+}
+
 export function releasePersistedAttachmentUpload(input: {
   readonly id: string;
   readonly environmentId: EnvironmentId;
