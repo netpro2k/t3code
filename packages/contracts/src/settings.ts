@@ -140,6 +140,27 @@ const LegacyConfirmQuit = Schema.Boolean.pipe(
 
 const QuitConfirmationModeSetting = Schema.Union([QuitConfirmationMode, LegacyConfirmQuit]);
 
+export const MacOSTurnCompletionNotificationMode = Schema.Literals([
+  "never",
+  "unfocused",
+  "always",
+]);
+export type MacOSTurnCompletionNotificationMode = typeof MacOSTurnCompletionNotificationMode.Type;
+export const DEFAULT_MACOS_TURN_COMPLETION_NOTIFICATION_MODE: MacOSTurnCompletionNotificationMode =
+  "unfocused";
+
+export const MacOSNotificationSettingsSchema = Schema.Struct({
+  turnCompletion: MacOSTurnCompletionNotificationMode.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_MACOS_TURN_COMPLETION_NOTIFICATION_MODE)),
+  ),
+  permissionNotifications: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
+  questionNotifications: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
+});
+export type MacOSNotificationSettings = typeof MacOSNotificationSettingsSchema.Type;
+export const DEFAULT_MACOS_NOTIFICATION_SETTINGS: MacOSNotificationSettings = Schema.decodeSync(
+  MacOSNotificationSettingsSchema,
+)({});
+
 /**
  * A user-chosen font family (a single name or a comma-separated list). Empty
  * means "use the app default"; clients compose their own fallback stacks.
@@ -211,6 +232,9 @@ export const ClientSettingsSchema = Schema.Struct({
     Schema.withDecodingDefault(Effect.succeed([])),
   ),
   diffIgnoreWhitespace: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
+  macOSNotifications: MacOSNotificationSettingsSchema.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_MACOS_NOTIFICATION_SETTINGS)),
+  ),
   environmentIdentificationMode: EnvironmentIdentificationMode.pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_ENVIRONMENT_IDENTIFICATION_MODE)),
   ),
@@ -961,6 +985,7 @@ export const ClientSettingsPatch = Schema.Struct({
   confirmThreadDelete: Schema.optionalKey(Schema.Boolean),
   confirmThreadUnpin: Schema.optionalKey(Schema.Boolean),
   diffIgnoreWhitespace: Schema.optionalKey(Schema.Boolean),
+  macOSNotifications: Schema.optionalKey(MacOSNotificationSettingsSchema),
   environmentIdentificationMode: Schema.optionalKey(EnvironmentIdentificationMode),
   glassOpacity: Schema.optionalKey(GlassOpacity),
   fontSizeInterface: Schema.optionalKey(InterfaceFontSize),

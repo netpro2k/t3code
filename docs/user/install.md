@@ -106,4 +106,5 @@ For multi-account setups, see [Codex](./providers-codex.md) and [Claude](./provi
 - [Permission modes](./permission-modes.md): how much T3 Code asks before acting
 - [Remote access](./remote-access.md): connect from a phone, tablet, or another desktop
 - [Keeping T3 Code in sync](./updating.md): client and server version skew
+- [macOS desktop notifications](./macos-desktop-notifications.md): native agent alerts and preferences
 - [Running in the background](./background-service.md): Linux background service

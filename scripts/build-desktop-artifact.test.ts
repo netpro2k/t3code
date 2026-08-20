@@ -26,6 +26,8 @@ import {
   DESKTOP_FILE_EXCLUSIONS,
   DESKTOP_EXTRA_RESOURCES,
   MAC_FILE_EXCLUSIONS,
+  MAC_NOTIFICATION_SOUND_EXTRA_RESOURCES,
+  MAC_NOTIFICATION_SOUND_FILE_NAME,
   InvalidMacPasskeyRpDomainError,
   InvalidMacPasskeyPublishableKeyError,
   InvalidMockUpdateServerPortError,
@@ -604,6 +606,11 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
       assert.notProperty(mac, "asarUnpack");
       assert.notProperty(linux, "asarUnpack");
       assert.notProperty(win, "asarUnpack");
+      assert.deepStrictEqual(mac.extraResources, [
+        ...DESKTOP_EXTRA_RESOURCES,
+        ...MAC_NOTIFICATION_SOUND_EXTRA_RESOURCES,
+      ]);
+      assert.deepStrictEqual(linux.extraResources, [...DESKTOP_EXTRA_RESOURCES]);
       assert.deepStrictEqual(win.extraResources, [
         {
           from: "apps/desktop/prod-resources/resource-monitor",
@@ -1445,6 +1452,13 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
       {
         from: "apps/desktop/prod-resources/resource-monitor",
         to: "resource-monitor",
+      },
+    ]);
+    assert.equal(MAC_NOTIFICATION_SOUND_FILE_NAME, "t3-notification.wav");
+    assert.deepStrictEqual(MAC_NOTIFICATION_SOUND_EXTRA_RESOURCES, [
+      {
+        from: "apps/desktop/resources/t3-notification.wav",
+        to: ".",
       },
     ]);
     assert.deepStrictEqual(resolveResourceMonitorRustTargets("mac", "universal"), [

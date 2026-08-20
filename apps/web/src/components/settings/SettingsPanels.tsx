@@ -21,6 +21,8 @@ import {
   DEFAULT_UNIFIED_SETTINGS,
   type EnvironmentIdentificationMode,
   MAX_APPEARANCE_CONTRAST,
+  type MacOSNotificationSettings,
+  type MacOSTurnCompletionNotificationMode,
   MAX_CODE_FONT_SIZE,
   MAX_GLASS_OPACITY,
   MAX_INTERFACE_FONT_SIZE,
@@ -168,6 +170,15 @@ const QUIT_CONFIRMATION_MODE_LABELS: Record<QuitConfirmationMode, string> = {
   direct: "Direct",
   hold: "Hold",
   "double-click": "Double press",
+};
+
+const MACOS_TURN_COMPLETION_NOTIFICATION_LABELS: Record<
+  MacOSTurnCompletionNotificationMode,
+  string
+> = {
+  never: "Never",
+  unfocused: "Only when unfocused",
+  always: "Always",
 };
 
 const BACKGROUND_ACTIVITY_PROFILE_LABELS: Record<BackgroundActivityProfile, string> = {
@@ -550,6 +561,18 @@ export function useSettingsRestore(onRestored?: () => void) {
         ? ["Delete confirmation"]
         : []),
       ...(settings.confirmQuit !== DEFAULT_UNIFIED_SETTINGS.confirmQuit ? ["Quit shortcut"] : []),
+      ...(settings.macOSNotifications.turnCompletion !==
+      DEFAULT_UNIFIED_SETTINGS.macOSNotifications.turnCompletion
+        ? ["Turn completion notifications"]
+        : []),
+      ...(settings.macOSNotifications.permissionNotifications !==
+      DEFAULT_UNIFIED_SETTINGS.macOSNotifications.permissionNotifications
+        ? ["Permission notifications"]
+        : []),
+      ...(settings.macOSNotifications.questionNotifications !==
+      DEFAULT_UNIFIED_SETTINGS.macOSNotifications.questionNotifications
+        ? ["Question notifications"]
+        : []),
       ...(isTextGenerationModelDirty ? ["Text generation model"] : []),
       ...getChangedBrowserSettingLabels(settings),
       ...(settings.enableAgentBrowserAccess !== DEFAULT_UNIFIED_SETTINGS.enableAgentBrowserAccess
@@ -570,6 +593,7 @@ export function useSettingsRestore(onRestored?: () => void) {
       settings.confirmThreadArchive,
       settings.confirmThreadDelete,
       settings.confirmThreadUnpin,
+      settings.macOSNotifications,
       settings.addProjectBaseDirectory,
       settings.defaultThreadEnvMode,
       settings.newWorktreesStartFromOrigin,
@@ -686,6 +710,7 @@ export function useSettingsRestore(onRestored?: () => void) {
       confirmThreadDelete: DEFAULT_UNIFIED_SETTINGS.confirmThreadDelete,
       confirmThreadUnpin: DEFAULT_UNIFIED_SETTINGS.confirmThreadUnpin,
       confirmQuit: DEFAULT_UNIFIED_SETTINGS.confirmQuit,
+      macOSNotifications: DEFAULT_UNIFIED_SETTINGS.macOSNotifications,
       textGenerationModelSelection: DEFAULT_UNIFIED_SETTINGS.textGenerationModelSelection,
       fontFamilySans: DEFAULT_UNIFIED_SETTINGS.fontFamilySans,
       fontFamilyComposer: DEFAULT_UNIFIED_SETTINGS.fontFamilyComposer,
@@ -1871,6 +1896,119 @@ function LegacyFeaturesSection() {
   );
 }
 
+function MacOSNotificationsSection() {
+  const settings = usePrimarySettings();
+  const updateSettings = useUpdatePrimarySettings();
+  const notificationSettings = settings.macOSNotifications;
+  const updateNotificationSettings = (patch: Partial<MacOSNotificationSettings>) => {
+    updateSettings({
+      macOSNotifications: {
+        ...notificationSettings,
+        ...patch,
+      },
+    });
+  };
+
+  return (
+    <SettingsSection title="Notifications">
+      <SettingsRow
+        {...searchableSetting("turn-completion-notifications")}
+        description="Set when T3 Code alerts you that an agent has finished."
+        resetAction={
+          notificationSettings.turnCompletion !==
+          DEFAULT_UNIFIED_SETTINGS.macOSNotifications.turnCompletion ? (
+            <SettingResetButton
+              label="turn completion notifications"
+              onClick={() =>
+                updateNotificationSettings({
+                  turnCompletion: DEFAULT_UNIFIED_SETTINGS.macOSNotifications.turnCompletion,
+                })
+              }
+            />
+          ) : null
+        }
+        control={
+          <Select
+            value={notificationSettings.turnCompletion}
+            onValueChange={(value) => {
+              if (value === "never" || value === "unfocused" || value === "always") {
+                updateNotificationSettings({ turnCompletion: value });
+              }
+            }}
+          >
+            <SelectTrigger className="w-full sm:w-48" aria-label="Turn completion notifications">
+              <SelectValue>
+                {MACOS_TURN_COMPLETION_NOTIFICATION_LABELS[notificationSettings.turnCompletion]}
+              </SelectValue>
+            </SelectTrigger>
+            <SelectPopup align="end" alignItemWithTrigger={false}>
+              <SelectItem value="never">Never</SelectItem>
+              <SelectItem value="unfocused">Only when unfocused</SelectItem>
+              <SelectItem value="always">Always</SelectItem>
+            </SelectPopup>
+          </Select>
+        }
+      />
+
+      <SettingsRow
+        {...searchableSetting("permission-notifications")}
+        description="Show alerts when agent approval is required to continue."
+        resetAction={
+          notificationSettings.permissionNotifications !==
+          DEFAULT_UNIFIED_SETTINGS.macOSNotifications.permissionNotifications ? (
+            <SettingResetButton
+              label="permission notifications"
+              onClick={() =>
+                updateNotificationSettings({
+                  permissionNotifications:
+                    DEFAULT_UNIFIED_SETTINGS.macOSNotifications.permissionNotifications,
+                })
+              }
+            />
+          ) : null
+        }
+        control={
+          <Switch
+            checked={notificationSettings.permissionNotifications}
+            onCheckedChange={(checked) =>
+              updateNotificationSettings({ permissionNotifications: Boolean(checked) })
+            }
+            aria-label="Enable permission notifications"
+          />
+        }
+      />
+
+      <SettingsRow
+        {...searchableSetting("question-notifications")}
+        description="Show alerts when input or plan review is needed to continue."
+        resetAction={
+          notificationSettings.questionNotifications !==
+          DEFAULT_UNIFIED_SETTINGS.macOSNotifications.questionNotifications ? (
+            <SettingResetButton
+              label="question notifications"
+              onClick={() =>
+                updateNotificationSettings({
+                  questionNotifications:
+                    DEFAULT_UNIFIED_SETTINGS.macOSNotifications.questionNotifications,
+                })
+              }
+            />
+          ) : null
+        }
+        control={
+          <Switch
+            checked={notificationSettings.questionNotifications}
+            onCheckedChange={(checked) =>
+              updateNotificationSettings({ questionNotifications: Boolean(checked) })
+            }
+            aria-label="Enable question notifications"
+          />
+        }
+      />
+    </SettingsSection>
+  );
+}
+
 export function GeneralSettingsPanel() {
   const settings = usePrimarySettings();
   const updateSettings = useUpdatePrimarySettings();
@@ -2537,6 +2675,10 @@ export function GeneralSettingsPanel() {
           }
         />
       </SettingsSection>
+
+      {isElectron && typeof navigator !== "undefined" && isMacPlatform(navigator.platform) ? (
+        <MacOSNotificationsSection />
+      ) : null}
 
       <SettingsSection title="About">
         {isElectron || HOSTED_APP_CHANNEL ? (

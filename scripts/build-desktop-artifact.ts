@@ -916,6 +916,13 @@ export const DESKTOP_EXTRA_RESOURCES = [
     to: "resource-monitor",
   },
 ] as const;
+export const MAC_NOTIFICATION_SOUND_FILE_NAME = "t3-notification.wav";
+export const MAC_NOTIFICATION_SOUND_EXTRA_RESOURCES = [
+  {
+    from: `apps/desktop/resources/${MAC_NOTIFICATION_SOUND_FILE_NAME}`,
+    to: ".",
+  },
+] as const;
 
 export interface MacPasskeySigningConfiguration {
   readonly appId: string;
@@ -2155,6 +2162,7 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
     // hand-packed server.asar sidecar (see WINDOWS_SERVER_ASAR_RESOURCE).
     extraResources: [
       ...DESKTOP_EXTRA_RESOURCES,
+      ...(platform === "mac" ? MAC_NOTIFICATION_SOUND_EXTRA_RESOURCES : []),
       ...(platform === "win" ? WINDOWS_SERVER_EXTRA_RESOURCES : []),
       ...(platform === "win" && wslRuntimeBundled ? WSL_RUNTIME_EXTRA_RESOURCES : []),
     ],

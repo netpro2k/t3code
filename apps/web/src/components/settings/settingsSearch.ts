@@ -200,6 +200,24 @@ export const SETTINGS_SEARCH_ITEMS = [
     ],
   },
   {
+    id: "turn-completion-notifications",
+    title: "Turn completion notifications",
+    to: "/settings/general",
+    macOnly: true,
+  },
+  {
+    id: "permission-notifications",
+    title: "Enable permission notifications",
+    to: "/settings/general",
+    macOnly: true,
+  },
+  {
+    id: "question-notifications",
+    title: "Enable question notifications",
+    to: "/settings/general",
+    macOnly: true,
+  },
+  {
     id: "new-threads",
     title: "New threads",
     to: "/settings/general",

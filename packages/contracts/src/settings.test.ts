@@ -112,6 +112,43 @@ describe("ClientSettings browser recording frame rate", () => {
   });
 });
 
+describe("ClientSettings macOS notifications", () => {
+  it("defaults to attention alerts and completion alerts while unfocused", () => {
+    expect(decodeClientSettings({}).macOSNotifications).toEqual({
+      turnCompletion: "unfocused",
+      permissionNotifications: true,
+      questionNotifications: true,
+    });
+  });
+
+  it.each(["never", "unfocused", "always"] as const)(
+    "accepts the %s turn completion mode",
+    (turnCompletion) => {
+      expect(
+        decodeClientSettingsPatch({
+          macOSNotifications: {
+            turnCompletion,
+            permissionNotifications: false,
+            questionNotifications: false,
+          },
+        }).macOSNotifications,
+      ).toEqual({
+        turnCompletion,
+        permissionNotifications: false,
+        questionNotifications: false,
+      });
+    },
+  );
+
+  it("fills missing nested preferences when decoding older settings", () => {
+    expect(decodeClientSettings({ macOSNotifications: {} }).macOSNotifications).toEqual({
+      turnCompletion: "unfocused",
+      permissionNotifications: true,
+      questionNotifications: true,
+    });
+  });
+});
+
 describe("ClientSettings glass opacity", () => {
   it("defaults to a readable translucent surface", () => {
     expect(decodeClientSettings({}).glassOpacity).toBe(80);

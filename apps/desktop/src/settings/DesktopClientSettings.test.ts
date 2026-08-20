@@ -37,6 +37,11 @@ const clientSettings: ClientSettings = {
   fontSizeTerminal: 12,
   fontSmoothing: true,
   glassOpacity: 80,
+  macOSNotifications: {
+    turnCompletion: "always",
+    permissionNotifications: true,
+    questionNotifications: true,
+  },
   planModeEnabled: false,
   showSkillsInSlashMenu: false,
   providerModelPreferences: {},

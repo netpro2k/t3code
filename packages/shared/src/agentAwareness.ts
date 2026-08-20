@@ -116,7 +116,7 @@ function resolveThreadAwarenessPhase(
   return null;
 }
 
-function headlineForPhase(phase: AgentAwarenessPhase): string {
+export function headlineForPhase(phase: AgentAwarenessPhase): string {
   switch (phase) {
     case "starting":
       return "Starting agent";
