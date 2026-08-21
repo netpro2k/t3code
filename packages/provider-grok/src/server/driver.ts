@@ -216,6 +216,7 @@ export const GrokDriver: ProviderDriver<GrokSettings, GrokDriverEnv, Path.Path> 
               snapshot: currentSnapshot,
               maintenanceCapabilities,
               enableProviderUpdateChecks: settings.enableProviderUpdateChecks,
+              respectPackageManagerReleaseAge: settings.respectPackageManagerReleaseAge,
               publishSnapshot,
             }),
           ),
