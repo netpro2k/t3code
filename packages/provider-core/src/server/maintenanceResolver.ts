@@ -1,5 +1,7 @@
-// @effect-diagnostics nodeBuiltinImport:off -- Synchronous hashing keeps env values out of cache keys.
+// @effect-diagnostics nodeBuiltinImport:off -- Synchronous hashing scopes installer cache keys; subprocesses read installer recency.
 import * as NodeCrypto from "node:crypto";
+import * as NodeChildProcess from "node:child_process";
+
 export type {
   ProviderMaintenanceCapabilities,
   ProviderMaintenanceCommandAction,
@@ -13,11 +15,12 @@ import {
   type ServerProvider,
   type ServerProviderVersionAdvisory,
 } from "@t3tools/contracts";
-import { compareSemverVersions, satisfiesSemverRange } from "@t3tools/shared/semver";
+import { compareSemverVersions, satisfiesSemverRange, parseSemver } from "@t3tools/shared/semver";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import { causeErrorTag } from "@t3tools/shared/observability";
 import { resolveCommandPath, resolveSpawnCommand } from "@t3tools/shared/shell";
 import * as Cache from "effect/Cache";
+import * as Context from "effect/Context";
 import * as Config from "effect/Config";
 import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
@@ -36,6 +39,7 @@ import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 import { collectUint8StreamText } from "./collectStreamText.ts";
 import * as ProviderLatestVersions from "./ProviderLatestVersions.ts";
 
+const LATEST_VERSION_CACHE_TTL_MS = 60 * 60 * 1_000;
 const LATEST_VERSION_TIMEOUT_MS = 4_000;
 const PROBE_TIMEOUT_MS = 10_000;
 const PROBE_MAX_BYTES = 256 * 1_024;
@@ -43,6 +47,21 @@ const MISE_WRAPPER_MAX_BYTES = 16 * 1_024;
 const PROVIDER_UPDATE_ACTION_TOAST_MESSAGE = "Install the update now or review provider settings.";
 
 const MAINTENANCE_CAPABILITIES_CACHE_TTL = Duration.hours(1);
+
+const PACKAGE_MANAGER_CONFIG_TIMEOUT_MS = 2_000;
+const NPM_GLOBAL_UPDATE_LOCK_KEY = "npm-global";
+const BUN_GLOBAL_UPDATE_LOCK_KEY = "bun-global";
+const PACKUMENT_TIME_META_KEYS = new Set(["created", "modified"]);
+const BUN_MINIMUM_RELEASE_AGE_SCRIPT = [
+  "const home = require('os').homedir();",
+  "const path = require('path');",
+  "const fs = require('fs');",
+  "const file = path.join(home, '.bunfig.toml');",
+  "if (!fs.existsSync(file)) { console.log(''); process.exit(0); }",
+  "const text = fs.readFileSync(file, 'utf8');",
+  "const match = /minimumReleaseAge\\s*=\\s*(\\d+)/.exec(text);",
+  "console.log(match ? match[1] : '');",
+].join(" ");
 
 const compactEnv = (input: Record<string, Option.Option<string>>): NodeJS.ProcessEnv =>
   Object.fromEntries(
@@ -125,6 +144,219 @@ function quoteUpdateExecutable(executable: string, platform: NodeJS.Platform): s
   // Windows terminals default to PowerShell, where a quoted executable needs &.
   return platform === "win32" && quoted !== executable ? `& ${quoted}` : quoted;
 }
+
+export interface PackageManagerReleaseAgeCutoffCacheEntry {
+  readonly expiresAt: number;
+  readonly beforeMs: number | null;
+}
+
+const PackageManagerReleaseAgeCutoffCache = Context.Reference<
+  Map<string, PackageManagerReleaseAgeCutoffCacheEntry>
+>("@t3tools/server/providerMaintenance/PackageManagerReleaseAgeCutoffCache", {
+  defaultValue: () => new Map(),
+});
+
+export interface PackageManagerReleaseAge {
+  readonly getCutoffMs: (input: {
+    readonly lockKey: string;
+    readonly nowMs: number;
+    readonly env?: NodeJS.ProcessEnv | undefined;
+    readonly npmPrefix?: string | undefined;
+  }) => Effect.Effect<number | null>;
+}
+
+export const PackageManagerReleaseAge = Context.Reference<PackageManagerReleaseAge>(
+  "@t3tools/server/providerMaintenance/PackageManagerReleaseAge",
+  {
+    defaultValue: () => ({
+      getCutoffMs: (input) => readCachedPackageManagerReleaseAgeCutoff(input),
+    }),
+  },
+);
+
+const NpmPackumentResponse = Schema.Struct({
+  "dist-tags": Schema.optional(
+    Schema.Struct({
+      latest: Schema.optional(Schema.String),
+    }),
+  ),
+  time: Schema.optional(Schema.Record(Schema.String, Schema.String)),
+});
+
+const decodeNpmLatestVersionResponse = Schema.decodeUnknownEffect(NpmLatestVersionResponse);
+const decodeNpmPackumentResponse = Schema.decodeUnknownEffect(NpmPackumentResponse);
+const decodeNpmPackumentJson = Schema.decodeEffect(Schema.fromJsonString(NpmPackumentResponse));
+
+export function parseNpmBeforeConfigValue(value: string): number | null {
+  const trimmed = value.trim();
+  if (trimmed.length === 0) {
+    return null;
+  }
+  const lowered = trimmed.toLowerCase();
+  if (lowered === "null" || lowered === "undefined" || lowered === "false" || lowered === "none") {
+    return null;
+  }
+  const parsed = Date.parse(trimmed);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function parseNonNegativeNumber(value: string): number | null {
+  const trimmed = value.trim();
+  if (trimmed.length === 0) {
+    return null;
+  }
+  const lowered = trimmed.toLowerCase();
+  if (lowered === "null" || lowered === "undefined" || lowered === "false" || lowered === "none") {
+    return null;
+  }
+  const parsed = Number(trimmed);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
+}
+
+function cutoffFromAge(nowMs: number, ageMs: number): number | null {
+  return ageMs === 0 ? null : nowMs - ageMs;
+}
+
+export function pickInstallableLatest(input: {
+  readonly distTagLatest: string | null;
+  readonly times: Readonly<Record<string, string>>;
+  readonly beforeMs: number | null;
+}): string | null {
+  const distTagLatest = input.distTagLatest;
+  const beforeMs = input.beforeMs;
+  if (beforeMs === null) {
+    return distTagLatest;
+  }
+
+  const isPublishedOnOrBeforeCutoff = (version: string): boolean => {
+    const publishedAt = input.times[version];
+    if (!publishedAt) {
+      return false;
+    }
+    const publishedMs = Date.parse(publishedAt);
+    return Number.isFinite(publishedMs) && publishedMs <= beforeMs;
+  };
+
+  if (distTagLatest && isPublishedOnOrBeforeCutoff(distTagLatest)) {
+    return distTagLatest;
+  }
+
+  let latest: string | null = null;
+  for (const version of Object.keys(input.times)) {
+    if (PACKUMENT_TIME_META_KEYS.has(version)) {
+      continue;
+    }
+    if (!isPublishedOnOrBeforeCutoff(version)) {
+      continue;
+    }
+    const parsed = parseSemver(version);
+    if (!parsed || parsed.prerelease.length > 0) {
+      continue;
+    }
+    if (latest === null || compareSemverVersions(version, latest) > 0) {
+      latest = version;
+    }
+  }
+  return latest;
+}
+
+const execFileUtf8 = (
+  command: string,
+  args: ReadonlyArray<string>,
+  options?: {
+    readonly timeoutMs?: number;
+    readonly maxBufferBytes?: number;
+    readonly env?: NodeJS.ProcessEnv | undefined;
+  },
+) => {
+  const timeoutMs = options?.timeoutMs ?? PACKAGE_MANAGER_CONFIG_TIMEOUT_MS;
+  return Effect.callback<string, Error>((resume) => {
+    const child = NodeChildProcess.execFile(
+      command,
+      [...args],
+      {
+        encoding: "utf8",
+        timeout: timeoutMs,
+        maxBuffer: options?.maxBufferBytes ?? 4 * 1024 * 1024,
+        windowsHide: true,
+        // Callers carry PATH-style lookup vars; keep the rest of our environment
+        // so tools like mise can still find their home and config.
+        env: options?.env ? { ...process.env, ...options.env } : undefined,
+      },
+      (error, stdout) => {
+        if (error) {
+          resume(Effect.fail(error));
+          return;
+        }
+        resume(Effect.succeed(typeof stdout === "string" ? stdout : String(stdout)));
+      },
+    );
+    return Effect.sync(() => {
+      child.kill();
+    });
+  }).pipe(
+    Effect.timeoutOption(timeoutMs),
+    Effect.map((result) => (Option.isNone(result) ? null : result.value.trim())),
+    Effect.orElseSucceed(() => null),
+  );
+};
+
+const readLivePackageManagerReleaseAgeCutoff = Effect.fn("readLivePackageManagerReleaseAgeCutoff")(
+  function* (input: Parameters<PackageManagerReleaseAge["getCutoffMs"]>[0]) {
+    switch (input.lockKey) {
+      case NPM_GLOBAL_UPDATE_LOCK_KEY: {
+        const configArgs = input.npmPrefix ? ["--global", "--prefix", input.npmPrefix] : [];
+        const before = yield* execFileUtf8("npm", ["config", "get", "before", ...configArgs], {
+          env: input.env,
+        });
+        const beforeMs = before ? parseNpmBeforeConfigValue(before) : null;
+        if (beforeMs !== null) {
+          return beforeMs;
+        }
+        const minReleaseAge = yield* execFileUtf8(
+          "npm",
+          ["config", "get", "min-release-age", ...configArgs],
+          { env: input.env },
+        );
+        const days = minReleaseAge ? parseNonNegativeNumber(minReleaseAge) : null;
+        return days === null ? null : cutoffFromAge(input.nowMs, days * 24 * 60 * 60 * 1_000);
+      }
+
+      case BUN_GLOBAL_UPDATE_LOCK_KEY: {
+        const stdout = yield* execFileUtf8("bun", ["-e", BUN_MINIMUM_RELEASE_AGE_SCRIPT], {
+          env: input.env,
+        });
+        const seconds = stdout ? parseNonNegativeNumber(stdout) : null;
+        return seconds === null ? null : cutoffFromAge(input.nowMs, seconds * 1_000);
+      }
+      default:
+        return null;
+    }
+  },
+);
+
+const readCachedPackageManagerReleaseAgeCutoff = Effect.fn(
+  "readCachedPackageManagerReleaseAgeCutoff",
+)(function* (input: Parameters<PackageManagerReleaseAge["getCutoffMs"]>[0]) {
+  const cache = yield* PackageManagerReleaseAgeCutoffCache;
+  const key = [
+    input.lockKey,
+    input.npmPrefix ?? "",
+    ...Object.entries(input.env ?? {})
+      .toSorted(([left], [right]) => left.localeCompare(right))
+      .flatMap(([name, value]) => [name, value === undefined ? "-" : `+${value}`]),
+  ].join("\0");
+  const cached = cache.get(key);
+  if (cached && cached.expiresAt > input.nowMs) {
+    return cached.beforeMs;
+  }
+  const beforeMs = yield* readLivePackageManagerReleaseAgeCutoff(input);
+  cache.set(key, {
+    expiresAt: input.nowMs + LATEST_VERSION_CACHE_TTL_MS,
+    beforeMs,
+  });
+  return beforeMs;
+});
 
 export function makeProviderMaintenanceCapabilities(input: {
   readonly provider: ProviderDriverKind;
@@ -954,33 +1186,48 @@ const withConfiguredNpmVersionLookup = Effect.fn("withConfiguredNpmVersionLookup
     ? update.args.indexOf("--prefix")
     : -1;
   const prefix = prefixIndex >= 0 ? update?.args[prefixIndex + 1] : undefined;
-  const lookup = runProbe(
-    npmPath,
-    [
-      "view",
-      "--global",
-      ...(prefix ? ["--prefix", prefix] : []),
-      "--json",
-      `${packageName}@latest`,
-      "version",
-    ],
-    env,
-  ).pipe(
-    Effect.map((stdout) => {
-      const value = stdout ? Option.getOrNull(decodeNpmViewVersion(stdout.trim())) : null;
+  const lookupRegistryVersion = Effect.fn("lookupConfiguredRegistryVersion")(function* (
+    beforeMs: number | null,
+  ) {
+    const stdout = yield* runProbe(
+      npmPath,
+      [
+        "view",
+        "--global",
+        ...(prefix ? ["--prefix", prefix] : []),
+        "--json",
+        ...(beforeMs === null
+          ? [`${packageName}@latest`, "version"]
+          : [packageName, "time", "dist-tags"]),
+      ],
+      env,
+    );
+    if (!stdout) return null;
+    if (beforeMs === null) {
+      const value = Option.getOrNull(decodeNpmViewVersion(stdout.trim()));
       return nonEmptyString(typeof value === "string" ? value : value?.[0]);
-    }),
+    }
+    const payload = yield* decodeNpmPackumentJson(stdout).pipe(Effect.orElseSucceed(() => null));
+    return payload
+      ? pickInstallableLatest({
+          distTagLatest: nonEmptyString(payload["dist-tags"]?.latest),
+          times: payload.time ?? {},
+          beforeMs,
+        })
+      : null;
+  }, Effect.provideContext(services));
+  const lookup = lookupRegistryVersion(null).pipe(
     Effect.tap((version) =>
       version === null
         ? Effect.logWarning("Configured npm version lookup failed", { packageName })
         : Effect.void,
     ),
-    Effect.provideContext(services),
   );
   return {
     ...capabilities,
     // npm owns registry, scoped auth and proxy configuration; failure must not retry public npm.
     latestVersion: null,
+    lookupRegistryVersion,
     lookupLatestVersion: capabilities.lookupLatestVersion
       ? capabilities.lookupLatestVersion.pipe(
           Effect.filterOrElse(
@@ -1106,19 +1353,30 @@ export function createProviderVersionAdvisory(input: {
   };
 }
 
-const fetchNpmLatestVersion = Effect.fn("fetchNpmLatestVersion")(function* (packageName: string) {
+const fetchRegistryJson = Effect.fn("fetchRegistryJson")(function* (path: string) {
   const client = yield* HttpClient.HttpClient;
-  const request = HttpClientRequest.get(
-    `https://registry.npmjs.org/${encodeURIComponent(packageName)}/latest`,
-  ).pipe(HttpClientRequest.setHeader("accept", "application/json"));
-  // The deadline covers the body too: headers can arrive before the JSON stalls.
-  const payload = yield* client.execute(request).pipe(
-    Effect.flatMap(HttpClientResponse.filterStatusOk),
-    Effect.flatMap(HttpClientResponse.schemaBodyJson(NpmLatestVersionResponse)),
-    Effect.timeoutOption(LATEST_VERSION_TIMEOUT_MS),
-    Effect.orElseSucceed(() => Option.none()),
+  const request = HttpClientRequest.get(`https://registry.npmjs.org/${path}`).pipe(
+    HttpClientRequest.setHeader("accept", "application/json"),
   );
-  return Option.isSome(payload) ? nonEmptyString(payload.value.version) : null;
+  // The deadline includes the response body, which can stall after headers arrive.
+  return yield* client.execute(request).pipe(
+    Effect.flatMap(HttpClientResponse.filterStatusOk),
+    Effect.flatMap((response) => response.json),
+    Effect.timeoutOption(LATEST_VERSION_TIMEOUT_MS),
+    Effect.map(Option.getOrNull),
+    Effect.orElseSucceed(() => null),
+  );
+});
+
+const fetchNpmLatestVersion = Effect.fn("fetchNpmLatestVersion")(function* (packageName: string) {
+  const payload = yield* fetchRegistryJson(`${encodeURIComponent(packageName)}/latest`).pipe(
+    Effect.flatMap((json) =>
+      json === null
+        ? Effect.succeed(null)
+        : decodeNpmLatestVersionResponse(json).pipe(Effect.orElseSucceed(() => null)),
+    ),
+  );
+  return payload ? nonEmptyString(payload.version) : null;
 });
 
 /**
@@ -1142,13 +1400,70 @@ export function latestProviderVersionCacheKeys(
     (key) => key !== null,
   );
 }
+const fetchNpmInstallableLatestVersion = Effect.fn("fetchNpmInstallableLatestVersion")(function* (
+  packageName: string,
+  beforeMs: number,
+) {
+  const payload = yield* fetchRegistryJson(encodeURIComponent(packageName)).pipe(
+    Effect.flatMap((json) =>
+      json === null
+        ? Effect.succeed(null)
+        : decodeNpmPackumentResponse(json).pipe(Effect.orElseSucceed(() => null)),
+    ),
+  );
+  if (!payload) {
+    return null;
+  }
+  return pickInstallableLatest({
+    distTagLatest: nonEmptyString(payload["dist-tags"]?.latest),
+    times: payload.time ?? {},
+    beforeMs,
+  });
+});
 
 export const resolveLatestProviderVersion = Effect.fn("resolveLatestProviderVersion")(function* (
   maintenanceCapabilities: ProviderMaintenanceCapabilities,
+  options?: {
+    readonly respectPackageManagerReleaseAge?: boolean;
+  },
 ) {
   const latestVersions = yield* ProviderLatestVersions.ProviderLatestVersions;
+  const packageName = maintenanceCapabilities.packageName;
+  const now = DateTime.toEpochMillis(yield* DateTime.now);
+  const updateLockKey = maintenanceCapabilities.update?.lockKey ?? null;
+  const lockKey = updateLockKey?.startsWith("npm-global:")
+    ? NPM_GLOBAL_UPDATE_LOCK_KEY
+    : updateLockKey;
+  const update = maintenanceCapabilities.update;
+  const prefixIndex = updateLockKey?.startsWith("npm-global:")
+    ? update?.args.indexOf("--prefix")
+    : undefined;
+  const npmPrefix =
+    prefixIndex !== undefined && prefixIndex >= 0 ? update?.args[prefixIndex + 1] : undefined;
+  const cutoffMs =
+    options?.respectPackageManagerReleaseAge !== false && lockKey
+      ? yield* (yield* PackageManagerReleaseAge).getCutoffMs({
+          lockKey,
+          nowMs: now,
+          env: update?.env,
+          npmPrefix,
+        })
+      : null;
+  const registryLookup = maintenanceCapabilities.lookupRegistryVersion;
+  const bypassInstaller =
+    options?.respectPackageManagerReleaseAge === false &&
+    maintenanceCapabilities.update?.lockKey === "pnpm-global";
+  if (registryLookup && (cutoffMs !== null || bypassInstaller)) {
+    const key = `${installerLatestVersionKey(maintenanceCapabilities)}@before:${cutoffMs}`;
+    return yield* latestVersions.cached(key, registryLookup(cutoffMs));
+  }
   const installerKey = installerLatestVersionKey(maintenanceCapabilities);
-  if (installerKey && maintenanceCapabilities.lookupLatestVersion) {
+  const pnpmPolicy = maintenanceCapabilities.update?.lockKey === "pnpm-global";
+  if (
+    installerKey &&
+    maintenanceCapabilities.lookupLatestVersion &&
+    (!pnpmPolicy || options?.respectPackageManagerReleaseAge !== false)
+  ) {
     const installable = yield* latestVersions.cached(
       installerKey,
       maintenanceCapabilities.lookupLatestVersion,
@@ -1158,12 +1473,17 @@ export const resolveLatestProviderVersion = Effect.fn("resolveLatestProviderVers
   if (maintenanceCapabilities.latestVersion !== undefined) {
     return maintenanceCapabilities.latestVersion;
   }
-  const packageName = maintenanceCapabilities.packageName;
   if (!packageName) {
     return null;
   }
 
-  return yield* latestVersions.cached(packageName, fetchNpmLatestVersion(packageName));
+  const cacheKey = cutoffMs === null ? packageName : `${packageName}@before:${cutoffMs}`;
+  return yield* latestVersions.cached(
+    cacheKey,
+    cutoffMs === null
+      ? fetchNpmLatestVersion(packageName)
+      : fetchNpmInstallableLatestVersion(packageName, cutoffMs),
+  );
 });
 
 export const invalidateLatestProviderVersion = Effect.fn("invalidateLatestProviderVersion")(
@@ -1184,6 +1504,7 @@ export const enrichProviderSnapshotWithVersionAdvisory = Effect.fn(
   maintenanceCapabilities?: ProviderMaintenanceCapabilities,
   options?: {
     readonly enableProviderUpdateChecks: boolean | undefined;
+    readonly respectPackageManagerReleaseAge?: boolean | undefined;
   },
 ) {
   const capabilities =
@@ -1207,7 +1528,12 @@ export const enrichProviderSnapshotWithVersionAdvisory = Effect.fn(
     };
   }
 
-  const latestVersion = yield* resolveLatestProviderVersion(capabilities);
+  const latestVersion = yield* resolveLatestProviderVersion(
+    capabilities,
+    options?.respectPackageManagerReleaseAge === undefined
+      ? undefined
+      : { respectPackageManagerReleaseAge: options.respectPackageManagerReleaseAge },
+  );
   return {
     ...snapshot,
     versionAdvisory: createProviderVersionAdvisory({

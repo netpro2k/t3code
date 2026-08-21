@@ -16,9 +16,9 @@ import * as Sink from "effect/Sink";
 import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
 import * as HttpClient from "effect/http/HttpClient";
-import * as HttpClientResponse from "effect/http/HttpClientResponse";
 import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 import * as ProviderLatestVersions from "./ProviderLatestVersions.ts";
+import * as HttpClientResponse from "effect/http/HttpClientResponse";
 import {
   createProviderVersionAdvisory,
   makeTargetedProviderUpdateAction,
@@ -33,6 +33,9 @@ import {
   npmGlobalPrefixFromCommandPath,
   parseChocolateyLatestVersion,
   parseHomebrewLatestVersion,
+  PackageManagerReleaseAge,
+  parseNpmBeforeConfigValue,
+  pickInstallableLatest,
   resolveLatestProviderVersion,
   resolvePackageManagedProviderMaintenance,
   resolveProviderMaintenanceCapabilitiesEffect,
@@ -252,6 +255,83 @@ function linkShim(tempDir: string, misePath: string, name: string) {
   return shimPath;
 }
 
+const packageManagerReleaseAge = (beforeMs: number) => ({
+  getCutoffMs: (input: { readonly lockKey: string }) =>
+    Effect.succeed(
+      input.lockKey === "npm-global" ||
+        input.lockKey === "pnpm-global" ||
+        input.lockKey === "bun-global"
+        ? beforeMs
+        : null,
+    ),
+});
+const registryHttpClient = (handler: (url: string) => unknown) =>
+  HttpClient.make((request) =>
+    Effect.succeed(
+      HttpClientResponse.fromWeb(
+        request,
+        Response.json(handler(String(request.url)), {
+          headers: { "content-type": "application/json" },
+        }),
+      ),
+    ),
+  );
+it("parses npm before config values", () => {
+  expect(parseNpmBeforeConfigValue("null")).toBeNull();
+  expect(parseNpmBeforeConfigValue("")).toBeNull();
+  expect(parseNpmBeforeConfigValue("2026-08-13T22:34:50.749Z")).toBe(
+    Date.parse("2026-08-13T22:34:50.749Z"),
+  );
+});
+
+it("picks registry latest when there is no recency cutoff", () => {
+  expect(
+    pickInstallableLatest({
+      distTagLatest: "2.0.0",
+      times: { "1.0.0": "2026-01-01T00:00:00.000Z", "2.0.0": "2026-08-20T00:00:00.000Z" },
+      beforeMs: null,
+    }),
+  ).toBe("2.0.0");
+});
+
+it("walks back from a too-new latest to the newest stable version at or before the cutoff", () => {
+  expect(
+    pickInstallableLatest({
+      distTagLatest: "2.0.0",
+      times: {
+        created: "2026-01-01T00:00:00.000Z",
+        modified: "2026-08-20T00:00:00.000Z",
+        "1.0.0": "2026-07-01T00:00:00.000Z",
+        "1.5.0": "2026-08-07T00:00:00.000Z",
+        "1.5.0-darwin-arm64": "2026-08-07T00:00:00.000Z",
+        "1.6.0-alpha.1": "2026-08-08T00:00:00.000Z",
+        "2.0.0": "2026-08-20T00:00:00.000Z",
+      },
+      beforeMs: Date.parse("2026-08-13T00:00:00.000Z"),
+    }),
+  ).toBe("1.5.0");
+});
+
+it("keeps dist-tag latest when it is old enough, even if newer stables exist after the cutoff", () => {
+  expect(
+    pickInstallableLatest({
+      distTagLatest: "1.4.0",
+      times: {
+        "1.4.0": "2026-08-01T00:00:00.000Z",
+        "1.5.0": "2026-08-20T00:00:00.000Z",
+      },
+      beforeMs: Date.parse("2026-08-13T00:00:00.000Z"),
+    }),
+  ).toBe("1.4.0");
+});
+
+const npmCapabilities = makeProviderMaintenanceCapabilities({
+  provider: driver("packageTool"),
+  packageName: "@example/package-tool",
+  updateExecutable: "npm",
+  updateArgs: ["install", "-g", "@example/package-tool@latest"],
+  updateLockKey: "npm-global:/test/prefix",
+});
 it.layer(
   Layer.mergeAll(
     NodeServices.layer,
@@ -259,6 +339,67 @@ it.layer(
     Layer.succeed(HostProcess.Environment, { PATH: "" }),
   ),
 )("providerMaintenance", (it) => {
+  it.effect("invalidates all policy variants after updating a package", () =>
+    Effect.gen(function* () {
+      const key = "@example/package-tool";
+      const versions = yield* ProviderLatestVersions.make([
+        [key, "1.0.0"],
+        [`${key}@before:123`, "1.0.0"],
+        ["@example/other", "1.0.0"],
+      ]);
+      yield* versions.invalidate(key);
+      for (const variant of [key, `${key}@before:123`]) {
+        expect(yield* versions.cached(variant, Effect.succeed("2.0.0"))).toBe("2.0.0");
+      }
+      expect(yield* versions.cached("@example/other", Effect.succeed("2.0.0"))).toBe("1.0.0");
+    }),
+  );
+
+  it.effect("reads cached versions through ProviderLatestVersions", () =>
+    resolveLatestProviderVersion(manualPackageTool).pipe(
+      Effect.provideServiceEffect(
+        ProviderLatestVersions.ProviderLatestVersions,
+        ProviderLatestVersions.make([["@example/package-tool", "9.9.9"]]),
+      ),
+      Effect.provideService(
+        HttpClient.HttpClient,
+        HttpClient.make(() =>
+          Effect.die("cached provider version should not make an HTTP request"),
+        ),
+      ),
+      Effect.map((version) => {
+        expect(version).toBe("9.9.9");
+      }),
+    ),
+  );
+
+  it.effect("bypasses pnpm policy lookup only when recency is disabled", () =>
+    Effect.gen(function* () {
+      const capabilities = {
+        ...npmCapabilities,
+        update: { ...npmCapabilities.update!, lockKey: "pnpm-global" },
+        lookupLatestVersion: Effect.succeed("1.1.0"),
+      };
+      expect(yield* resolveLatestProviderVersion(capabilities)).toBe("1.1.0");
+      expect(
+        yield* resolveLatestProviderVersion(capabilities, {
+          respectPackageManagerReleaseAge: false,
+        }),
+      ).toBe("9.9.9");
+    }).pipe(
+      Effect.provideService(
+        HttpClient.HttpClient,
+        HttpClient.make(() =>
+          Effect.die("Policy and cached provider versions must not make an HTTP request"),
+        ),
+      ),
+      Effect.provideServiceEffect(
+        ProviderLatestVersions.ProviderLatestVersions,
+        ProviderLatestVersions.make([["@example/package-tool", "9.9.9"]]),
+      ),
+    ),
+  );
+
   it.effect("prefers the installer's own latest version over the npm registry", () =>
     resolveLatestProviderVersion({ ...manualPackageTool, latestVersion: "1.2.0" }).pipe(
       Effect.provide(ProviderLatestVersions.layer),
@@ -332,6 +473,20 @@ it.layer(
   );
 
   it.effect.each([
+    {
+      install: "npm",
+      cutoff: Date.parse("2026-08-13T00:00:00Z"),
+      liveConfig: true,
+      stdout: JSON.stringify({
+        "dist-tags": { latest: "2.0.0" },
+        time: {
+          "1.1.0": "2026-08-01T00:00:00Z",
+          "2.0.0": "2026-08-20T00:00:00Z",
+        },
+      }),
+      exitCode: 0,
+      latest: "1.1.0",
+    },
     { install: "native", stdout: '"1.2.0"', exitCode: 0, latest: "1.2.0" },
     { install: "manual", stdout: '["1.2.0"]', exitCode: 0, latest: "1.2.0" },
     { install: "npm", stdout: '"1.2.0"', exitCode: 0, latest: "1.2.0" },
@@ -346,7 +501,14 @@ it.layer(
       Effect.gen(function* () {
         const tempDir = yield* makeTempDir("t3-registry-version");
         const npmBinDir = NodePath.join(tempDir, "npm-bin");
-        writeExecutable(NodePath.join(npmBinDir, "npm"));
+        const npmPath = NodePath.join(npmBinDir, "npm");
+        writeExecutable(npmPath);
+        if ("liveConfig" in fixture) {
+          NodeFS.writeFileSync(
+            npmPath,
+            '#!/bin/sh\nif [ "$1" = config ]; then echo 2026-08-13T00:00:00Z; fi\n',
+          );
+        }
         const binaryPath =
           fixture.install === "npm"
             ? linkIntoPackage(tempDir, "package-tool", [
@@ -374,8 +536,10 @@ it.layer(
                   "--global",
                   ...(fixture.install === "npm" ? ["--prefix", tempDir] : []),
                   "--json",
-                  `${capabilities.packageName}@latest`,
-                  "version",
+                  "cutoff" in fixture
+                    ? capabilities.packageName
+                    : `${capabilities.packageName}@latest`,
+                  ...("cutoff" in fixture ? ["time", "dist-tags"] : ["version"]),
                 ]);
                 return fixture.stdout;
               },
@@ -403,6 +567,12 @@ it.layer(
           expect(probes).toBe(2);
         });
         yield* program.pipe(
+          Effect.provideService(
+            PackageManagerReleaseAge,
+            "liveConfig" in fixture
+              ? PackageManagerReleaseAge.defaultValue()
+              : { getCutoffMs: () => Effect.succeed(null) },
+          ),
           Effect.provideServiceEffect(
             ProviderLatestVersions.ProviderLatestVersions,
             ProviderLatestVersions.make([
@@ -2097,6 +2267,111 @@ it.layer(
       expect(yield* resolve()).toEqual(manualPackageTool);
       expect(resolutions).toBe(2);
     }),
+  );
+  it.effect("uses registry latest when package-manager recency is off", () => {
+    const urls: string[] = [];
+    return enrichProviderSnapshotWithVersionAdvisory(
+      installedPackageToolProvider,
+      npmCapabilities,
+      {
+        enableProviderUpdateChecks: true,
+        respectPackageManagerReleaseAge: false,
+      },
+    ).pipe(
+      Effect.provide(ProviderLatestVersions.layer),
+      Effect.provideService(
+        HttpClient.HttpClient,
+        registryHttpClient((url) => {
+          urls.push(url);
+          return { version: "2.0.0" };
+        }),
+      ),
+      Effect.provideService(
+        PackageManagerReleaseAge,
+        packageManagerReleaseAge(Date.parse("2026-08-13T00:00:00.000Z")),
+      ),
+      Effect.map((provider) => {
+        expect(urls).toEqual(["https://registry.npmjs.org/%40example%2Fpackage-tool/latest"]);
+        expect(provider.versionAdvisory).toMatchObject({
+          status: "behind_latest",
+          currentVersion: "1.0.0",
+          latestVersion: "2.0.0",
+        });
+      }),
+    );
+  });
+
+  it.effect("walks back to the installable latest when npm recency blocks registry latest", () => {
+    const urls: string[] = [];
+    const cutoff = Date.parse("2026-08-13T00:00:00.000Z");
+    return enrichProviderSnapshotWithVersionAdvisory(
+      installedPackageToolProvider,
+      npmCapabilities,
+      {
+        enableProviderUpdateChecks: true,
+        respectPackageManagerReleaseAge: true,
+      },
+    ).pipe(
+      Effect.provide(ProviderLatestVersions.layer),
+      Effect.provideService(
+        HttpClient.HttpClient,
+        registryHttpClient((url) => {
+          urls.push(url);
+          return {
+            "dist-tags": { latest: "2.0.0" },
+            time: {
+              "1.0.0": "2026-07-01T00:00:00.000Z",
+              "1.5.0": "2026-08-07T00:00:00.000Z",
+              "2.0.0": "2026-08-20T00:00:00.000Z",
+            },
+          };
+        }),
+      ),
+      Effect.provideService(PackageManagerReleaseAge, packageManagerReleaseAge(cutoff)),
+      Effect.map((provider) => {
+        expect(urls).toEqual(["https://registry.npmjs.org/%40example%2Fpackage-tool"]);
+        expect(provider.versionAdvisory).toMatchObject({
+          status: "behind_latest",
+          currentVersion: "1.0.0",
+          latestVersion: "1.5.0",
+        });
+      }),
+    );
+  });
+
+  it.effect(
+    "treats the provider as current when the installable latest matches the installed version",
+    () => {
+      const cutoff = Date.parse("2026-08-13T00:00:00.000Z");
+      return enrichProviderSnapshotWithVersionAdvisory(
+        installedPackageToolProvider,
+        npmCapabilities,
+        {
+          enableProviderUpdateChecks: true,
+          respectPackageManagerReleaseAge: true,
+        },
+      ).pipe(
+        Effect.provide(ProviderLatestVersions.layer),
+        Effect.provideService(
+          HttpClient.HttpClient,
+          registryHttpClient(() => ({
+            "dist-tags": { latest: "2.0.0" },
+            time: {
+              "1.0.0": "2026-08-07T00:00:00.000Z",
+              "2.0.0": "2026-08-20T00:00:00.000Z",
+            },
+          })),
+        ),
+        Effect.provideService(PackageManagerReleaseAge, packageManagerReleaseAge(cutoff)),
+        Effect.map((provider) => {
+          expect(provider.versionAdvisory).toMatchObject({
+            status: "current",
+            currentVersion: "1.0.0",
+            latestVersion: "1.0.0",
+          });
+        }),
+      );
+    },
   );
 });
 
