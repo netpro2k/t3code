@@ -2,6 +2,11 @@ import type { ProviderDriverKind } from "@t3tools/contracts";
 import type * as Effect from "effect/Effect";
 
 export interface ProviderMaintenanceCapabilities {
+  readonly managedLatest?: {
+    readonly executable: string;
+    readonly args: ReadonlyArray<string>;
+    readonly toolName: string;
+  };
   readonly provider: ProviderDriverKind;
   readonly packageName: string | null;
   readonly update: ProviderMaintenanceCommandAction | null;

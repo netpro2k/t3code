@@ -1,5 +1,6 @@
 import { describe, it, assert } from "@effect/vitest";
 import {
+  DEFAULT_SERVER_SETTINGS,
   ProviderDriverKind,
   ProviderInstanceId,
   type ServerProvider,
@@ -21,12 +22,14 @@ import * as HostProcess from "@t3tools/shared/HostProcess";
 import { SpawnExecutableResolution } from "@t3tools/shared/shell";
 
 import * as ProviderRegistry from "./ProviderRegistry.ts";
+import * as ServerSettings from "../serverSettings.ts";
 import * as ModelManifest from "./ModelManifest.ts";
 import * as ProviderMaintenanceRunner from "./providerMaintenanceRunner.ts";
 import * as ProviderLatestVersions from "@t3tools/provider-core/server/ProviderLatestVersions";
 import {
   enrichProviderSnapshotWithVersionAdvisory,
   makeProviderMaintenanceCapabilities,
+  PackageManagerReleaseAge,
   type ProviderMaintenanceCapabilities,
 } from "@t3tools/provider-core/server/maintenanceResolver";
 const isServerProviderUpdateError = Schema.is(ServerProviderUpdateError);
@@ -219,6 +222,8 @@ const makeTestRunner = (
       ranges: [],
     })),
   },
+  respectPackageManagerReleaseAge = true,
+  cutoffMs: number | null = null,
 ) =>
   Effect.service(ProviderMaintenanceRunner.ProviderMaintenanceRunner).pipe(
     Effect.provide(
@@ -233,6 +238,22 @@ const makeTestRunner = (
               refreshInBackground: Effect.void,
             }),
             ProviderLatestVersions.layer,
+            Layer.succeed(ServerSettings.ServerSettingsService, {
+              start: Effect.void,
+              ready: Effect.void,
+              getSettings: Effect.succeed({
+                ...DEFAULT_SERVER_SETTINGS,
+                respectPackageManagerReleaseAge,
+              }),
+              updateSettings: () => Effect.die("unexpected settings write"),
+              updateProviderInstance: () => Effect.die("unexpected provider write"),
+              withSettingsSnapshot: (use) => use(DEFAULT_SERVER_SETTINGS),
+              streamChanges: Stream.empty,
+              subscribeChanges: Effect.succeed(Stream.empty),
+            }),
+            Layer.succeed(PackageManagerReleaseAge, {
+              getCutoffMs: () => Effect.succeed(cutoffMs),
+            }),
           ),
         ),
       ),
@@ -240,6 +261,53 @@ const makeTestRunner = (
   );
 
 describe("providerMaintenanceRunner", () => {
+  it.effect.each([true, false])(
+    "verifies updates against the environment recency policy: %s",
+    (respectAge) =>
+      Effect.gen(function* () {
+        const { registry } = yield* makeRegistry(baseProvider);
+        const updater = yield* makeTestRunner(
+          registry,
+          undefined,
+          respectAge,
+          Date.parse("2026-01-02T00:00:00Z"),
+        );
+        const result = yield* updater.updateProvider(CODEX_DRIVER);
+        assert.strictEqual(
+          result.providers[0]?.updateState?.status,
+          respectAge ? "succeeded" : "unchanged",
+        );
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(
+            layerNonWindowsPlatform,
+            layerMockSpawner(() => ({ stdout: "updated" })),
+            Layer.succeed(
+              HttpClient.HttpClient,
+              HttpClient.make((request) =>
+                Effect.succeed(
+                  HttpClientResponse.fromWeb(
+                    request,
+                    Response.json(
+                      String(request.url).endsWith("/latest")
+                        ? { version: "2.0.0" }
+                        : {
+                            "dist-tags": { latest: "2.0.0" },
+                            time: {
+                              "0.0.0": "2026-01-01T00:00:00Z",
+                              "2.0.0": "2026-01-03T00:00:00Z",
+                            },
+                          },
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+  );
+
   it.effect("runs the allowlisted provider update command and records success", () => {
     const calls: Array<{ command: string; args: ReadonlyArray<string> }> = [];
     return Effect.gen(function* () {
