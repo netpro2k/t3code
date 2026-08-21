@@ -370,6 +370,19 @@ describe("ServerSettings worktree defaults", () => {
   });
 });
 
+describe("ServerSettings.respectPackageManagerReleaseAge", () => {
+  it("defaults on so update reminders follow the installer recency gate", () => {
+    expect(decodeServerSettings({}).respectPackageManagerReleaseAge).toBe(true);
+  });
+
+  it("accepts turning the recency gate off", () => {
+    expect(
+      decodeServerSettingsPatch({ respectPackageManagerReleaseAge: false })
+        .respectPackageManagerReleaseAge,
+    ).toBe(false);
+  });
+});
+
 describe("ServerSettings.sourceControlWritingStyle", () => {
   it.each([
     { legacy: "", mode: "repo_conventions", customInstructions: "" },
