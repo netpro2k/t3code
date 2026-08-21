@@ -181,6 +181,16 @@ describe("EnvironmentProviderSettings routing", () => {
     expect(settingsState.updateEnvironmentIds).toEqual([environmentId]);
   });
 
+  it("renders the package-manager recency setting", () => {
+    const panel = renderPanel();
+    expect(
+      visitElements(
+        panel,
+        (element) => element.props["aria-label"] === "Respect package manager recency",
+      ),
+    ).not.toBeNull();
+  });
+
   it("routes refresh and provider update commands to the selected environment", async () => {
     atoms.providers = [provider()];
     const panel = renderPanel();

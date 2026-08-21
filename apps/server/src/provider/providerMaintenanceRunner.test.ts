@@ -24,6 +24,7 @@ import { ProviderRegistry, type ProviderRegistryShape } from "./Services/Provide
 import * as ProviderMaintenanceRunner from "./providerMaintenanceRunner.ts";
 import {
   makeProviderMaintenanceCapabilities,
+  PackageManagerReleaseAge,
   ProviderVersionCache,
   type ProviderMaintenanceCapabilities,
 } from "./providerMaintenance.ts";
@@ -92,16 +93,21 @@ const baseOpenCodeProvider: ServerProvider = {
 };
 
 const latestVersionHttpClient = (version: string) =>
-  Layer.succeed(
-    HttpClient.HttpClient,
-    HttpClient.make((request) =>
-      Effect.succeed(
-        HttpClientResponse.fromWeb(
-          request,
-          Response.json({ version }, { headers: { "content-type": "application/json" } }),
+  Layer.mergeAll(
+    Layer.succeed(
+      HttpClient.HttpClient,
+      HttpClient.make((request) =>
+        Effect.succeed(
+          HttpClientResponse.fromWeb(
+            request,
+            Response.json({ version }, { headers: { "content-type": "application/json" } }),
+          ),
         ),
       ),
     ),
+    Layer.succeed(PackageManagerReleaseAge, {
+      getCutoffMs: () => Effect.succeed(null),
+    }),
   );
 
 function mockHandle(result: {
@@ -210,6 +216,9 @@ const makeTestRunner = (registry: ProviderRegistryShape) =>
           Layer.mergeAll(
             Layer.succeed(ProviderRegistry, registry),
             Layer.succeed(ProviderVersionCache, new Map()),
+            Layer.succeed(PackageManagerReleaseAge, {
+              getCutoffMs: () => Effect.succeed(null),
+            }),
           ),
         ),
       ),

@@ -387,6 +387,19 @@ describe("ServerSettings worktree defaults", () => {
   });
 });
 
+describe("ServerSettings.respectPackageManagerReleaseAge", () => {
+  it("defaults on so update reminders follow the installer recency gate", () => {
+    expect(decodeServerSettings({}).respectPackageManagerReleaseAge).toBe(true);
+  });
+
+  it("accepts turning the recency gate off", () => {
+    expect(
+      decodeServerSettingsPatch({ respectPackageManagerReleaseAge: false })
+        .respectPackageManagerReleaseAge,
+    ).toBe(false);
+  });
+});
+
 describe("ServerSettings.sourceControlWritingStyle", () => {
   it("defaults all style settings for legacy configs", () => {
     const settings = decodeServerSettings({});

@@ -157,6 +157,7 @@ export const CursorDriver: ProviderDriver<CursorSettings, CursorDriverEnv> = {
             snapshot: currentSnapshot,
             maintenanceCapabilities,
             enableProviderUpdateChecks: settings.enableProviderUpdateChecks,
+            respectPackageManagerReleaseAge: settings.respectPackageManagerReleaseAge,
             publishSnapshot,
             stampIdentity,
             httpClient,
