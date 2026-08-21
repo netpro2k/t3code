@@ -281,6 +281,7 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv, Path.
           Effect.flatMap((maintenanceCapabilities) =>
             enrichProviderSnapshotWithVersionAdvisory(snapshot, maintenanceCapabilities, {
               enableProviderUpdateChecks: settings.enableProviderUpdateChecks,
+              respectPackageManagerReleaseAge: settings.respectPackageManagerReleaseAge,
             }),
           ),
           Effect.provideService(HttpClient.HttpClient, httpClient),

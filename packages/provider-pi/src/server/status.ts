@@ -537,6 +537,7 @@ export const enrichPiSnapshot = (input: {
   readonly snapshot: ServerProvider;
   readonly maintenanceCapabilities: ProviderMaintenanceCapabilities;
   readonly enableProviderUpdateChecks?: boolean;
+  readonly respectPackageManagerReleaseAge?: boolean;
   readonly publishSnapshot: (snapshot: ServerProvider) => Effect.Effect<void>;
 }): Effect.Effect<
   void,
@@ -546,6 +547,7 @@ export const enrichPiSnapshot = (input: {
   const { snapshot, publishSnapshot } = input;
   return enrichProviderSnapshotWithVersionAdvisory(snapshot, input.maintenanceCapabilities, {
     enableProviderUpdateChecks: input.enableProviderUpdateChecks,
+    respectPackageManagerReleaseAge: input.respectPackageManagerReleaseAge,
   }).pipe(
     Effect.flatMap((enrichedSnapshot) => publishSnapshot(enrichedSnapshot)),
     Effect.catchCause((cause) =>

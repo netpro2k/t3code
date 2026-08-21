@@ -24,11 +24,13 @@ import { HttpClient } from "effect/http";
 import { ChildProcess, ChildProcessSpawner } from "effect/process";
 import * as NodeUtil from "node:util";
 
+import * as ServerSettings from "../serverSettings.ts";
 import * as ModelManifest from "./ModelManifest.ts";
 import { resolveProviderCompatibility } from "./providerCompatibility.ts";
 import * as ProviderRegistry from "./ProviderRegistry.ts";
 import { makeProviderMaintenanceCommandCoordinator } from "./providerMaintenanceCommandCoordinator.ts";
 import {
+  PackageManagerReleaseAge,
   enrichProviderSnapshotWithVersionAdvisory,
   invalidateLatestProviderVersion,
   makeTargetedProviderUpdateAction,
@@ -300,11 +302,17 @@ function makeUpdateState(input: {
 
 /** @public */
 export const make = Effect.fn("ProviderMaintenanceRunner.make")(function* () {
+  const settingsService = yield* ServerSettings.ServerSettingsService;
+  const respectReleaseAge = settingsService.getSettings.pipe(
+    Effect.map((settings) => settings.respectPackageManagerReleaseAge),
+    Effect.orElseSucceed(() => true),
+  );
   const providerRegistry = yield* ProviderRegistry.ProviderRegistry;
   const manifestService = yield* ModelManifest.ModelManifest;
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
   const httpClient = yield* HttpClient.HttpClient;
   const latestVersions = yield* ProviderLatestVersions.ProviderLatestVersions;
+  const releaseAge = yield* PackageManagerReleaseAge;
   const runMaintenanceCommand = (
     update: ProviderMaintenanceCommandAction,
     onProgress: (line: string) => Effect.Effect<void>,
@@ -346,11 +354,16 @@ export const make = Effect.fn("ProviderMaintenanceRunner.make")(function* () {
         return Effect.forEach(
           refreshedProviders,
           (refreshedProvider) =>
-            enrichProviderSnapshotWithVersionAdvisory(
-              refreshedProvider,
-              maintenanceCapabilities,
-            ).pipe(
+            respectReleaseAge.pipe(
+              Effect.flatMap((respectPackageManagerReleaseAge) =>
+                enrichProviderSnapshotWithVersionAdvisory(
+                  refreshedProvider,
+                  maintenanceCapabilities,
+                  { enableProviderUpdateChecks: true, respectPackageManagerReleaseAge },
+                ),
+              ),
               Effect.provideService(HttpClient.HttpClient, httpClient),
+              Effect.provideService(PackageManagerReleaseAge, releaseAge),
               Effect.provideService(ProviderLatestVersions.ProviderLatestVersions, latestVersions),
             ),
           {
@@ -455,12 +468,22 @@ export const make = Effect.fn("ProviderMaintenanceRunner.make")(function* () {
             }
 
             const manifest = yield* manifestService.current;
-            // Check compatibility against what an unpinned command would install now.
+            const respectPackageManagerReleaseAge = yield* respectReleaseAge;
+            const currentVersion =
+              (yield* providerRegistry.getProviders).find(
+                (candidate) => candidate.instanceId === instanceId,
+              )?.installedVersion ?? null;
             const candidateVersion =
               targetVersion ??
               (yield* invalidateLatestProviderVersion(fresh).pipe(
-                Effect.andThen(resolveLatestProviderVersion(fresh)),
+                Effect.andThen(
+                  resolveLatestProviderVersion(fresh, {
+                    currentVersion,
+                    respectPackageManagerReleaseAge,
+                  }),
+                ),
                 Effect.provideService(HttpClient.HttpClient, httpClient),
+                Effect.provideService(PackageManagerReleaseAge, releaseAge),
                 Effect.provideService(
                   ProviderLatestVersions.ProviderLatestVersions,
                   latestVersions,

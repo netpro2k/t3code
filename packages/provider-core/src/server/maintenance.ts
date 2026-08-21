@@ -2,6 +2,11 @@ import type { ProviderDriverKind } from "@t3tools/contracts";
 import type * as Effect from "effect/Effect";
 
 export interface ProviderMaintenanceCapabilities {
+  readonly managedLatest?: {
+    readonly executable: string;
+    readonly args: ReadonlyArray<string>;
+    readonly toolName: string;
+  };
   readonly provider: ProviderDriverKind;
   readonly packageName: string | null;
   readonly update: ProviderMaintenanceCommandAction | null;
@@ -12,6 +17,7 @@ export interface ProviderMaintenanceCapabilities {
    * `latestVersion`, then npm.
    */
   readonly lookupLatestVersion?: Effect.Effect<string | null>;
+  readonly lookupRegistryVersion?: (beforeMs: number | null) => Effect.Effect<string | null>;
   /** Separates installer release channels that share an update command. */
   readonly latestVersionCacheKey?: string;
   readonly compareVersions?: (current: string, latest: string) => number;
