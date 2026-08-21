@@ -53,7 +53,14 @@ export const make = Effect.fn("ProviderLatestVersions.make")(function* (
     invalidate: Effect.fn("ProviderLatestVersions.invalidate")(function (key) {
       return Ref.update(entries, (current) => {
         const next = new Map(current);
-        next.delete(key);
+        for (const entryKey of next.keys()) {
+          if (
+            entryKey === key ||
+            entryKey.startsWith(`${key}@before:`) ||
+            entryKey.startsWith(`${key}@managed:`)
+          )
+            next.delete(entryKey);
+        }
         return next;
       });
     }),

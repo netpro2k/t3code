@@ -1,3 +1,6 @@
+// @effect-diagnostics nodeBuiltinImport:off
+import * as NodeChildProcess from "node:child_process";
+
 export type {
   ProviderMaintenanceCapabilities,
   ProviderMaintenanceCommandAction,
@@ -11,11 +14,12 @@ import {
   type ServerProvider,
   type ServerProviderVersionAdvisory,
 } from "@t3tools/contracts";
-import { compareSemverVersions, satisfiesSemverRange } from "@t3tools/shared/semver";
+import { compareSemverVersions, satisfiesSemverRange, parseSemver } from "@t3tools/shared/semver";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import { causeErrorTag } from "@t3tools/shared/observability";
 import { resolveCommandPath, resolveSpawnCommand } from "@t3tools/shared/shell";
 import * as Cache from "effect/Cache";
+import * as Context from "effect/Context";
 import * as Config from "effect/Config";
 import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
@@ -33,6 +37,7 @@ import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 import { collectUint8StreamText } from "./collectStreamText.ts";
 import * as ProviderLatestVersions from "./ProviderLatestVersions.ts";
 
+const LATEST_VERSION_CACHE_TTL_MS = 60 * 60 * 1_000;
 const LATEST_VERSION_TIMEOUT_MS = 4_000;
 const PROBE_TIMEOUT_MS = 10_000;
 const PROBE_MAX_BYTES = 256 * 1_024;
@@ -40,6 +45,23 @@ const MISE_WRAPPER_MAX_BYTES = 16 * 1_024;
 const PROVIDER_UPDATE_ACTION_TOAST_MESSAGE = "Install the update now or review provider settings.";
 
 const MAINTENANCE_CAPABILITIES_CACHE_TTL = Duration.hours(1);
+
+const PACKAGE_MANAGER_CONFIG_TIMEOUT_MS = 2_000;
+const MANAGED_LATEST_TIMEOUT_MS = 10_000;
+const NPM_GLOBAL_UPDATE_LOCK_KEY = "npm-global";
+const BUN_GLOBAL_UPDATE_LOCK_KEY = "bun-global";
+const MISE_UPDATE_LOCK_KEY = "mise";
+const PACKUMENT_TIME_META_KEYS = new Set(["created", "modified"]);
+const BUN_MINIMUM_RELEASE_AGE_SCRIPT = [
+  "const home = require('os').homedir();",
+  "const path = require('path');",
+  "const fs = require('fs');",
+  "const file = path.join(home, '.bunfig.toml');",
+  "if (!fs.existsSync(file)) { console.log(''); process.exit(0); }",
+  "const text = fs.readFileSync(file, 'utf8');",
+  "const match = /minimumReleaseAge\\s*=\\s*(\\d+)/.exec(text);",
+  "console.log(match ? match[1] : '');",
+].join(" ");
 
 const compactEnv = (input: Record<string, Option.Option<string>>): NodeJS.ProcessEnv =>
   Object.fromEntries(
@@ -112,6 +134,300 @@ function quoteUpdateExecutable(executable: string, platform: NodeJS.Platform): s
   // Windows terminals default to PowerShell, where a quoted executable needs &.
   return platform === "win32" && quoted !== executable ? `& ${quoted}` : quoted;
 }
+
+export interface PackageManagerReleaseAgeCutoffCacheEntry {
+  readonly expiresAt: number;
+  readonly beforeMs: number | null;
+}
+
+const PackageManagerReleaseAgeCutoffCache = Context.Reference<
+  Map<string, PackageManagerReleaseAgeCutoffCacheEntry>
+>("@t3tools/server/providerMaintenance/PackageManagerReleaseAgeCutoffCache", {
+  defaultValue: () => new Map(),
+});
+
+export interface PackageManagerReleaseAge {
+  readonly getCutoffMs: (input: {
+    readonly lockKey: string;
+    readonly nowMs: number;
+  }) => Effect.Effect<number | null>;
+}
+
+export const PackageManagerReleaseAge = Context.Reference<PackageManagerReleaseAge>(
+  "@t3tools/server/providerMaintenance/PackageManagerReleaseAge",
+  {
+    defaultValue: () => ({
+      getCutoffMs: (input) => readCachedPackageManagerReleaseAgeCutoff(input),
+    }),
+  },
+);
+
+const NpmPackumentResponse = Schema.Struct({
+  "dist-tags": Schema.optional(
+    Schema.Struct({
+      latest: Schema.optional(Schema.String),
+    }),
+  ),
+  time: Schema.optional(Schema.Record(Schema.String, Schema.String)),
+});
+
+const decodeNpmLatestVersionResponse = Schema.decodeUnknownEffect(NpmLatestVersionResponse);
+const decodeNpmPackumentResponse = Schema.decodeUnknownEffect(NpmPackumentResponse);
+
+export function parseNpmBeforeConfigValue(value: string): number | null {
+  const trimmed = value.trim();
+  if (trimmed.length === 0) {
+    return null;
+  }
+  const lowered = trimmed.toLowerCase();
+  if (lowered === "null" || lowered === "undefined" || lowered === "false" || lowered === "none") {
+    return null;
+  }
+  const parsed = Date.parse(trimmed);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function parseNonNegativeNumber(value: string): number | null {
+  const trimmed = value.trim();
+  if (trimmed.length === 0) {
+    return null;
+  }
+  const lowered = trimmed.toLowerCase();
+  if (lowered === "null" || lowered === "undefined" || lowered === "false" || lowered === "none") {
+    return null;
+  }
+  const parsed = Number(trimmed);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
+}
+
+function cutoffFromAge(nowMs: number, ageMs: number): number | null {
+  return ageMs === 0 ? null : nowMs - ageMs;
+}
+
+export function pickInstallableLatest(input: {
+  readonly distTagLatest: string | null;
+  readonly times: Readonly<Record<string, string>>;
+  readonly beforeMs: number | null;
+}): string | null {
+  const distTagLatest = input.distTagLatest;
+  const beforeMs = input.beforeMs;
+  if (beforeMs === null) {
+    return distTagLatest;
+  }
+
+  const isPublishedOnOrBeforeCutoff = (version: string): boolean => {
+    const publishedAt = input.times[version];
+    if (!publishedAt) {
+      return false;
+    }
+    const publishedMs = Date.parse(publishedAt);
+    return Number.isFinite(publishedMs) && publishedMs <= beforeMs;
+  };
+
+  if (distTagLatest && isPublishedOnOrBeforeCutoff(distTagLatest)) {
+    return distTagLatest;
+  }
+
+  let latest: string | null = null;
+  for (const version of Object.keys(input.times)) {
+    if (PACKUMENT_TIME_META_KEYS.has(version)) {
+      continue;
+    }
+    if (!isPublishedOnOrBeforeCutoff(version)) {
+      continue;
+    }
+    const parsed = parseSemver(version);
+    if (!parsed || parsed.prerelease.length > 0) {
+      continue;
+    }
+    if (latest === null || compareSemverVersions(version, latest) > 0) {
+      latest = version;
+    }
+  }
+  return latest;
+}
+
+const execFileUtf8 = (
+  command: string,
+  args: ReadonlyArray<string>,
+  options?: {
+    readonly timeoutMs?: number;
+    readonly maxBufferBytes?: number;
+    readonly env?: NodeJS.ProcessEnv | undefined;
+  },
+) => {
+  const timeoutMs = options?.timeoutMs ?? PACKAGE_MANAGER_CONFIG_TIMEOUT_MS;
+  return Effect.callback<string, Error>((resume) => {
+    const child = NodeChildProcess.execFile(
+      command,
+      [...args],
+      {
+        encoding: "utf8",
+        timeout: timeoutMs,
+        maxBuffer: options?.maxBufferBytes ?? 4 * 1024 * 1024,
+        windowsHide: true,
+        // Callers carry PATH-style lookup vars; keep the rest of our environment
+        // so tools like mise can still find their home and config.
+        env: options?.env ? { ...process.env, ...options.env } : undefined,
+      },
+      (error, stdout) => {
+        if (error) {
+          resume(Effect.fail(error));
+          return;
+        }
+        resume(Effect.succeed(typeof stdout === "string" ? stdout : String(stdout)));
+      },
+    );
+    return Effect.sync(() => {
+      child.kill();
+    });
+  }).pipe(
+    Effect.timeoutOption(timeoutMs),
+    Effect.map((result) => (Option.isNone(result) ? null : result.value.trim())),
+    Effect.orElseSucceed(() => null),
+  );
+};
+
+const readLivePackageManagerReleaseAgeCutoff = Effect.fn("readLivePackageManagerReleaseAgeCutoff")(
+  function* (input: { readonly lockKey: string; readonly nowMs: number }) {
+    switch (input.lockKey) {
+      case NPM_GLOBAL_UPDATE_LOCK_KEY: {
+        const before = yield* execFileUtf8("npm", ["config", "get", "before"]);
+        const beforeMs = before ? parseNpmBeforeConfigValue(before) : null;
+        if (beforeMs !== null) {
+          return beforeMs;
+        }
+        const minReleaseAge = yield* execFileUtf8("npm", ["config", "get", "min-release-age"]);
+        const days = minReleaseAge ? parseNonNegativeNumber(minReleaseAge) : null;
+        return days === null ? null : cutoffFromAge(input.nowMs, days * 24 * 60 * 60 * 1_000);
+      }
+
+      case BUN_GLOBAL_UPDATE_LOCK_KEY: {
+        const stdout = yield* execFileUtf8("bun", ["-e", BUN_MINIMUM_RELEASE_AGE_SCRIPT]);
+        const seconds = stdout ? parseNonNegativeNumber(stdout) : null;
+        return seconds === null ? null : cutoffFromAge(input.nowMs, seconds * 1_000);
+      }
+      default:
+        return null;
+    }
+  },
+);
+
+const readCachedPackageManagerReleaseAgeCutoff = Effect.fn(
+  "readCachedPackageManagerReleaseAgeCutoff",
+)(function* (input: { readonly lockKey: string; readonly nowMs: number }) {
+  const cache = yield* PackageManagerReleaseAgeCutoffCache;
+  const cached = cache.get(input.lockKey);
+  if (cached && cached.expiresAt > input.nowMs) {
+    return cached.beforeMs;
+  }
+  const beforeMs = yield* readLivePackageManagerReleaseAgeCutoff(input);
+  cache.set(input.lockKey, {
+    expiresAt: input.nowMs + LATEST_VERSION_CACHE_TTL_MS,
+    beforeMs,
+  });
+  return beforeMs;
+});
+
+const MiseInstalledTool = Schema.Struct({
+  install_path: Schema.optional(Schema.String),
+});
+
+const MiseLsResponse = Schema.Record(Schema.String, Schema.Array(MiseInstalledTool));
+
+const decodeMiseLsResponse = Schema.decodeEffect(Schema.fromJsonString(MiseLsResponse));
+
+const MiseOutdatedTool = Schema.Struct({
+  latest: Schema.String,
+});
+
+const MiseOutdatedResponse = Schema.Record(Schema.String, MiseOutdatedTool);
+
+const decodeMiseOutdatedResponse = Schema.decodeEffect(Schema.fromJsonString(MiseOutdatedResponse));
+
+export const parseMiseOutdatedLatestVersion = Effect.fn("parseMiseOutdatedLatestVersion")(
+  function* (input: {
+    readonly stdout: string;
+    readonly toolName: string;
+    readonly currentVersion?: string | null;
+  }) {
+    const outdated = yield* decodeMiseOutdatedResponse(input.stdout);
+    const entry = outdated[input.toolName];
+    return (
+      entry?.latest ?? (Object.keys(outdated).length === 0 ? (input.currentVersion ?? null) : null)
+    );
+  },
+);
+
+// mise owns a provider binary when `mise which` resolves it and the owning
+// configured tool's install dir contains it. The longest matching install dir
+// wins so backend-flattened names like npm:@xai-official/grok still map back.
+const readLiveMiseCommandResolution = Effect.fn("readLiveMiseCommandResolution")(function* (input: {
+  readonly binaryName: string;
+  readonly packageName: string;
+  readonly commandPaths: ReadonlyArray<string>;
+  readonly env?: NodeJS.ProcessEnv | undefined;
+}) {
+  const whichPath = yield* execFileUtf8("mise", ["which", input.binaryName], { env: input.env });
+  if (!whichPath) {
+    return { commandPath: null, toolName: null };
+  }
+  const fileSystem = yield* FileSystem.FileSystem;
+  const realWhichPath = yield* fileSystem
+    .realPath(whichPath)
+    .pipe(Effect.orElseSucceed(() => whichPath));
+  const fromShim = input.commandPaths.some((path) =>
+    normalizeCommandPath(path).includes("/mise/shims/"),
+  );
+  if (
+    !fromShim &&
+    !input.commandPaths.some(
+      (path) => normalizeCommandPath(path) === normalizeCommandPath(realWhichPath),
+    )
+  ) {
+    return { commandPath: null, toolName: null };
+  }
+  const lsJson = yield* execFileUtf8("mise", ["ls", "--json"], {
+    env: input.env,
+    timeoutMs: MANAGED_LATEST_TIMEOUT_MS,
+  });
+  if (!lsJson) {
+    return { commandPath: realWhichPath, toolName: null };
+  }
+  const payload = yield* decodeMiseLsResponse(lsJson).pipe(Effect.orElseSucceed(() => null));
+  if (!payload) {
+    return { commandPath: realWhichPath, toolName: null };
+  }
+  const normalizedWhichPath = normalizeCommandPath(realWhichPath);
+  let ownedToolName: string | null = null;
+  let ownedInstallPathLength = -1;
+  for (const [toolName, installs] of Object.entries(payload)) {
+    // A runtime managed by mise can expose unrelated global executables from
+    // its install tree (for example npm-global OpenCode under mise's Node).
+    // Only the provider's direct tool or its matching npm backend owns it.
+    if (toolName !== input.binaryName && toolName !== `npm:${input.packageName}`) {
+      continue;
+    }
+    for (const install of installs) {
+      const installPath = nonEmptyString(install.install_path);
+      if (!installPath) {
+        continue;
+      }
+      const realInstallPath = yield* fileSystem
+        .realPath(installPath)
+        .pipe(Effect.orElseSucceed(() => installPath));
+      const normalizedInstallPath = normalizeCommandPath(realInstallPath);
+      if (
+        normalizedWhichPath.startsWith(`${normalizedInstallPath}/`) &&
+        normalizedInstallPath.length > ownedInstallPathLength
+      ) {
+        ownedInstallPathLength = normalizedInstallPath.length;
+        ownedToolName = toolName;
+      }
+    }
+  }
+  return { commandPath: realWhichPath, toolName: ownedToolName };
+});
 
 export function makeProviderMaintenanceCapabilities(input: {
   readonly provider: ProviderDriverKind;
@@ -222,6 +538,13 @@ function isVitePlusGlobalCommandPath(commandPath: string): boolean {
   return /\/(?:\.vite-plus|\.local\/share\/vite-plus|appdata\/local\/vite-plus)\/bin\//.test(
     normalizeCommandPath(commandPath),
   );
+}
+
+function isMiseInstallsCommandPath(commandPath: string): boolean {
+  const normalized = normalizeCommandPath(commandPath);
+  // Shims are symlinks to the mise binary itself, so realpath never reaches
+  // the installs tree; the shim location is what survives resolution.
+  return normalized.includes("/mise/installs/") || normalized.includes("/mise/shims/");
 }
 
 function isBunGlobalCommandPath(commandPath: string): boolean {
@@ -434,6 +757,39 @@ export const resolvePackageManagedProviderMaintenance = Effect.fn(
     packageName: definition.npmPackageName,
     installPath: context.realCommandPath,
   });
+  if ([context.resolvedCommandPath, context.realCommandPath].some(isMiseInstallsCommandPath)) {
+    const binaryName = context.binaryPath.split(/[\\/]/).pop() ?? context.binaryPath;
+    const owned = yield* readLiveMiseCommandResolution({
+      binaryName,
+      packageName: definition.npmPackageName,
+      commandPaths: [context.resolvedCommandPath, context.realCommandPath],
+      env: context.env,
+    });
+    if (owned.toolName) {
+      return {
+        ...makeProviderMaintenanceCapabilities({
+          provider: definition.provider,
+          packageName: definition.npmPackageName,
+          updateExecutable: "mise",
+          updateArgs: ["upgrade", owned.toolName],
+          updateLockKey: MISE_UPDATE_LOCK_KEY,
+        }),
+        managedLatest: {
+          executable: "mise",
+          args: ["outdated", "--json", owned.toolName],
+          toolName: owned.toolName,
+        },
+      };
+    }
+    // A shim can expose a global package installed under mise's Node runtime.
+    if (owned.commandPath) {
+      context = {
+        ...context,
+        resolvedCommandPath: owned.commandPath,
+        realCommandPath: owned.commandPath,
+      };
+    }
+  }
   const commandPaths = [context.resolvedCommandPath, context.realCommandPath];
   const packageName = definition.npmPackageName;
   // WinGet-managed claude update exits 0 without updating; T3 does not run winget upgrade.
@@ -817,11 +1173,11 @@ export function createProviderVersionAdvisory(input: {
   };
 }
 
-const fetchNpmLatestVersion = Effect.fn("fetchNpmLatestVersion")(function* (packageName: string) {
+const fetchRegistryJson = Effect.fn("fetchRegistryJson")(function* (path: string) {
   const client = yield* HttpClient.HttpClient;
-  const request = HttpClientRequest.get(
-    `https://registry.npmjs.org/${encodeURIComponent(packageName)}/latest`,
-  ).pipe(HttpClientRequest.setHeader("accept", "application/json"));
+  const request = HttpClientRequest.get(`https://registry.npmjs.org/${path}`).pipe(
+    HttpClientRequest.setHeader("accept", "application/json"),
+  );
   const response = yield* client.execute(request).pipe(
     Effect.timeoutOption(LATEST_VERSION_TIMEOUT_MS),
     Effect.orElseSucceed(() => Option.none()),
@@ -833,9 +1189,16 @@ const fetchNpmLatestVersion = Effect.fn("fetchNpmLatestVersion")(function* (pack
   if (httpResponse.status < 200 || httpResponse.status >= 300) {
     return null;
   }
-  const payload = yield* httpResponse.json.pipe(
-    Effect.flatMap(Schema.decodeUnknownEffect(NpmLatestVersionResponse)),
-    Effect.orElseSucceed(() => null),
+  return yield* httpResponse.json.pipe(Effect.orElseSucceed(() => null));
+});
+
+const fetchNpmLatestVersion = Effect.fn("fetchNpmLatestVersion")(function* (packageName: string) {
+  const payload = yield* fetchRegistryJson(`${encodeURIComponent(packageName)}/latest`).pipe(
+    Effect.flatMap((json) =>
+      json === null
+        ? Effect.succeed(null)
+        : decodeNpmLatestVersionResponse(json).pipe(Effect.orElseSucceed(() => null)),
+    ),
   );
   return payload ? nonEmptyString(payload.version) : null;
 });
@@ -855,13 +1218,42 @@ export function latestProviderVersionCacheKeys(
     (key) => key !== null,
   );
 }
+const fetchNpmInstallableLatestVersion = Effect.fn("fetchNpmInstallableLatestVersion")(function* (
+  packageName: string,
+  beforeMs: number,
+) {
+  const payload = yield* fetchRegistryJson(encodeURIComponent(packageName)).pipe(
+    Effect.flatMap((json) =>
+      json === null
+        ? Effect.succeed(null)
+        : decodeNpmPackumentResponse(json).pipe(Effect.orElseSucceed(() => null)),
+    ),
+  );
+  if (!payload) {
+    return null;
+  }
+  return pickInstallableLatest({
+    distTagLatest: nonEmptyString(payload["dist-tags"]?.latest),
+    times: payload.time ?? {},
+    beforeMs,
+  });
+});
 
 export const resolveLatestProviderVersion = Effect.fn("resolveLatestProviderVersion")(function* (
   maintenanceCapabilities: ProviderMaintenanceCapabilities,
+  options?: {
+    readonly currentVersion?: string | null;
+    readonly respectPackageManagerReleaseAge?: boolean;
+  },
 ) {
   const latestVersions = yield* ProviderLatestVersions.ProviderLatestVersions;
   const installerKey = installerLatestVersionKey(maintenanceCapabilities);
-  if (installerKey && maintenanceCapabilities.lookupLatestVersion) {
+  const pnpmPolicy = maintenanceCapabilities.update?.lockKey === "pnpm-global";
+  if (
+    installerKey &&
+    maintenanceCapabilities.lookupLatestVersion &&
+    (!pnpmPolicy || options?.respectPackageManagerReleaseAge !== false)
+  ) {
     const installable = yield* latestVersions.cached(
       installerKey,
       maintenanceCapabilities.lookupLatestVersion,
@@ -876,7 +1268,44 @@ export const resolveLatestProviderVersion = Effect.fn("resolveLatestProviderVers
     return null;
   }
 
-  return yield* latestVersions.cached(packageName, fetchNpmLatestVersion(packageName));
+  const now = DateTime.toEpochMillis(yield* DateTime.now);
+  const managedLatest =
+    options?.respectPackageManagerReleaseAge === false
+      ? null
+      : maintenanceCapabilities.managedLatest;
+  if (managedLatest) {
+    const cacheKey = `${packageName}@managed:${[managedLatest.executable, ...managedLatest.args].join(" ")}`;
+    return yield* latestVersions.cached(
+      cacheKey,
+      Effect.gen(function* () {
+        const env = yield* readCommandLookupEnv;
+        const stdout = yield* execFileUtf8(managedLatest.executable, [...managedLatest.args], {
+          timeoutMs: MANAGED_LATEST_TIMEOUT_MS,
+          env,
+        });
+        return yield* parseMiseOutdatedLatestVersion({
+          stdout: stdout ?? "",
+          toolName: managedLatest.toolName,
+          currentVersion: options?.currentVersion ?? null,
+        }).pipe(Effect.orElseSucceed(() => null));
+      }),
+    );
+  }
+  const updateLockKey = maintenanceCapabilities.update?.lockKey ?? null;
+  const lockKey = updateLockKey?.startsWith("npm-global:")
+    ? NPM_GLOBAL_UPDATE_LOCK_KEY
+    : updateLockKey;
+  const cutoffMs =
+    options?.respectPackageManagerReleaseAge !== false && lockKey
+      ? yield* (yield* PackageManagerReleaseAge).getCutoffMs({ lockKey, nowMs: now })
+      : null;
+  const cacheKey = cutoffMs === null ? packageName : `${packageName}@before:${cutoffMs}`;
+  return yield* latestVersions.cached(
+    cacheKey,
+    cutoffMs === null
+      ? fetchNpmLatestVersion(packageName)
+      : fetchNpmInstallableLatestVersion(packageName, cutoffMs),
+  );
 });
 
 export const invalidateLatestProviderVersion = Effect.fn("invalidateLatestProviderVersion")(
@@ -897,6 +1326,7 @@ export const enrichProviderSnapshotWithVersionAdvisory = Effect.fn(
   maintenanceCapabilities?: ProviderMaintenanceCapabilities,
   options?: {
     readonly enableProviderUpdateChecks: boolean | undefined;
+    readonly respectPackageManagerReleaseAge?: boolean | undefined;
   },
 ) {
   const capabilities =
@@ -920,7 +1350,14 @@ export const enrichProviderSnapshotWithVersionAdvisory = Effect.fn(
     };
   }
 
-  const latestVersion = yield* resolveLatestProviderVersion(capabilities);
+  const latestVersionOptions =
+    options?.respectPackageManagerReleaseAge === undefined
+      ? { currentVersion }
+      : {
+          currentVersion,
+          respectPackageManagerReleaseAge: options.respectPackageManagerReleaseAge,
+        };
+  const latestVersion = yield* resolveLatestProviderVersion(capabilities, latestVersionOptions);
   return {
     ...snapshot,
     versionAdvisory: createProviderVersionAdvisory({
