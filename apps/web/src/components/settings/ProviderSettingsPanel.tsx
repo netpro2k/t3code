@@ -76,6 +76,7 @@ import {
 } from "../ui/number-field";
 import { ScrollArea } from "../ui/scroll-area";
 import { Toggle, ToggleGroup } from "../ui/toggle-group";
+import { Switch } from "../ui/switch";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { stackedThreadToast, toastManager } from "../ui/toast";
 import { AddProviderInstanceDialog } from "./AddProviderInstanceDialog";
@@ -1158,6 +1159,35 @@ export function EnvironmentProviderSettings({
               </NumberField>
               <span className="text-xs text-muted-foreground">seconds</span>
             </div>
+          }
+        />
+        <SettingsRow
+          {...searchableSetting("package-manager-recency")}
+          description="When checking for provider updates, skip versions the installer would refuse because they were published too recently."
+          resetAction={
+            !readOnly &&
+            settings.respectPackageManagerReleaseAge !==
+              DEFAULT_UNIFIED_SETTINGS.respectPackageManagerReleaseAge ? (
+              <SettingResetButton
+                label="package manager recency"
+                onClick={() =>
+                  updateSettings({
+                    respectPackageManagerReleaseAge:
+                      DEFAULT_UNIFIED_SETTINGS.respectPackageManagerReleaseAge,
+                  })
+                }
+              />
+            ) : null
+          }
+          control={
+            <Switch
+              disabled={readOnly}
+              checked={settings.respectPackageManagerReleaseAge}
+              onCheckedChange={(checked) =>
+                updateSettings({ respectPackageManagerReleaseAge: Boolean(checked) })
+              }
+              aria-label="Respect package manager recency"
+            />
           }
         />
       </SettingsSection>
