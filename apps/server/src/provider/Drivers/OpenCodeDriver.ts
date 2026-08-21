@@ -239,6 +239,7 @@ export const OpenCodeDriver: ProviderDriver<OpenCodeSettings, OpenCodeDriverEnv>
               Effect.flatMap((maintenanceCapabilities) =>
                 enrichProviderSnapshotWithVersionAdvisory(snapshot, maintenanceCapabilities, {
                   enableProviderUpdateChecks: settings.enableProviderUpdateChecks,
+                  respectPackageManagerReleaseAge: settings.respectPackageManagerReleaseAge,
                 }),
               ),
               Effect.provideService(HttpClient.HttpClient, httpClient),

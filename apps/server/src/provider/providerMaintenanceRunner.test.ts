@@ -25,6 +25,7 @@ import * as ModelManifest from "./ModelManifest.ts";
 import * as ProviderMaintenanceRunner from "./providerMaintenanceRunner.ts";
 import {
   makeProviderMaintenanceCapabilities,
+  PackageManagerReleaseAge,
   ProviderVersionCache,
   type ProviderMaintenanceCapabilities,
 } from "./providerMaintenance.ts";
@@ -93,16 +94,21 @@ const baseOpenCodeProvider: ServerProvider = {
 };
 
 const latestVersionHttpClient = (version: string) =>
-  Layer.succeed(
-    HttpClient.HttpClient,
-    HttpClient.make((request) =>
-      Effect.succeed(
-        HttpClientResponse.fromWeb(
-          request,
-          Response.json({ version }, { headers: { "content-type": "application/json" } }),
+  Layer.mergeAll(
+    Layer.succeed(
+      HttpClient.HttpClient,
+      HttpClient.make((request) =>
+        Effect.succeed(
+          HttpClientResponse.fromWeb(
+            request,
+            Response.json({ version }, { headers: { "content-type": "application/json" } }),
+          ),
         ),
       ),
     ),
+    Layer.succeed(PackageManagerReleaseAge, {
+      getCutoffMs: () => Effect.succeed(null),
+    }),
   );
 
 function mockHandle(result: {
@@ -237,6 +243,9 @@ const makeTestRunner = (
             }),
             // Fresh per runner so a version cached by one test cannot leak into another.
             Layer.sync(ProviderVersionCache, () => new Map()),
+            Layer.succeed(PackageManagerReleaseAge, {
+              getCutoffMs: () => Effect.succeed(null),
+            }),
           ),
         ),
       ),

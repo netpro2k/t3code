@@ -576,6 +576,11 @@ export const SETTINGS_SEARCH_ITEMS = [
     providerSettingsOnly: true,
   },
   {
+    id: "package-manager-recency",
+    title: "Respect package manager recency",
+    to: "/settings/providers",
+  },
+  {
     id: "agent-browser-access",
     title: "Agent browser access",
     to: "/settings/integrations",

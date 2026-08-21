@@ -8,6 +8,7 @@ import type * as ServerSettingsModule from "../serverSettings.ts";
 export interface ProviderSnapshotSettings<Settings> {
   readonly provider: Settings;
   readonly enableProviderUpdateChecks: boolean;
+  readonly respectPackageManagerReleaseAge: boolean;
 }
 
 function makeProviderSnapshotSettings<Settings>(
@@ -17,6 +18,7 @@ function makeProviderSnapshotSettings<Settings>(
   return {
     provider,
     enableProviderUpdateChecks: settings.enableProviderUpdateChecks,
+    respectPackageManagerReleaseAge: settings.respectPackageManagerReleaseAge,
   };
 }
 

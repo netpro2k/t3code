@@ -172,6 +172,7 @@ export const GrokDriver: ProviderDriver<GrokSettings, GrokDriverEnv> = {
                 snapshot: currentSnapshot,
                 maintenanceCapabilities,
                 enableProviderUpdateChecks: settings.enableProviderUpdateChecks,
+                respectPackageManagerReleaseAge: settings.respectPackageManagerReleaseAge,
                 publishSnapshot,
                 httpClient,
               }),
