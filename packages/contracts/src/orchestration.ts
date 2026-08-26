@@ -132,6 +132,7 @@ export const ProviderRequestKind = Schema.Literals([
   "command",
   "file-read",
   "file-change",
+  "permissions",
   "mcp-elicitation",
 ]);
 export type ProviderRequestKind = typeof ProviderRequestKind.Type;

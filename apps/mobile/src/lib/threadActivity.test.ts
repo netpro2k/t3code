@@ -176,6 +176,29 @@ describe("pending approvals", () => {
     ]);
   });
 
+  it("derives permission-profile requests as actionable approvals", () => {
+    const activity = makeActivity({
+      id: EventId.make("approval-permissions"),
+      kind: "approval.requested",
+      summary: "Permission approval requested",
+      createdAt: "2026-08-24T00:00:00.000Z",
+      payload: {
+        requestId: "req-permissions",
+        requestType: "permissions_approval",
+        detail: "Allow Finder access",
+      },
+    });
+
+    expect(derivePendingApprovals([activity])).toEqual([
+      {
+        requestId: "req-permissions",
+        requestKind: "permissions",
+        createdAt: "2026-08-24T00:00:00.000Z",
+        detail: "Allow Finder access",
+      },
+    ]);
+  });
+
   it("removes an app access approval after a remote client rejects it", () => {
     const requested = makeActivity({
       id: EventId.make("approval-safari-open"),

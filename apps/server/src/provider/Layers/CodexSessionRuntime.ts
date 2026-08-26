@@ -276,6 +276,19 @@ interface PendingApproval {
   readonly decision: Deferred.Deferred<ProviderApprovalDecision>;
 }
 
+export function permissionApprovalResponse(
+  permissions: EffectCodexSchema.PermissionsRequestApprovalParams["permissions"],
+  decision: ProviderApprovalDecision,
+): EffectCodexSchema.PermissionsRequestApprovalResponse {
+  if (decision === "accept" || decision === "acceptForSession" || decision === "acceptAlways") {
+    return {
+      permissions,
+      scope: decision === "accept" ? "turn" : "session",
+    };
+  }
+  return { permissions: {} };
+}
+
 interface ApprovalCorrelation {
   readonly requestId: ApprovalRequestId;
   readonly requestKind: ProviderRequestKind;
@@ -2026,6 +2039,65 @@ export const makeCodexSessionRuntime = (
         return {
           decision: resolved === "acceptAlways" ? "acceptForSession" : resolved,
         } satisfies EffectCodexSchema.FileChangeRequestApprovalResponse;
+      }),
+    );
+
+    yield* client.handleServerRequest("item/permissions/requestApproval", (payload) =>
+      Effect.gen(function* () {
+        const requestId = ApprovalRequestId.make(
+          yield* randomUUIDv4("permissions-approval-request"),
+        );
+        const turnId = TurnId.make(payload.turnId);
+        const itemId = ProviderItemId.make(payload.itemId);
+        const decision = yield* Deferred.make<ProviderApprovalDecision>();
+
+        yield* Ref.update(pendingApprovalsRef, (current) => {
+          const next = new Map(current);
+          next.set(requestId, {
+            requestId,
+            jsonRpcId: payload.itemId,
+            requestKind: "permissions",
+            turnId,
+            itemId,
+            decision,
+          });
+          return next;
+        });
+        yield* Ref.update(approvalCorrelationsRef, (current) => {
+          const next = new Map(current);
+          next.set(payload.itemId, {
+            requestId,
+            requestKind: "permissions",
+            turnId,
+            itemId,
+          });
+          return next;
+        });
+
+        yield* emitEvent({
+          kind: "request",
+          threadId: options.threadId,
+          method: "item/permissions/requestApproval",
+          requestId,
+          requestKind: "permissions",
+          turnId,
+          itemId,
+          payload: {
+            ...payload,
+            detail: payload.reason ?? "Additional permissions requested",
+          },
+        });
+
+        const resolved = yield* Deferred.await(decision).pipe(
+          Effect.ensuring(
+            Ref.update(pendingApprovalsRef, (current) => {
+              const next = new Map(current);
+              next.delete(requestId);
+              return next;
+            }),
+          ),
+        );
+        return permissionApprovalResponse(payload.permissions, resolved);
       }),
     );
 

@@ -2711,6 +2711,35 @@ describe("ProviderRuntimeIngestion", () => {
     expect(resolvedPayload?.requestType).toBe("command_execution_approval");
   });
 
+  it("maps permission-profile requests into permission approval activities", async () => {
+    const harness = await createHarness();
+    harness.emit({
+      type: "request.opened",
+      eventId: asEventId("evt-permissions-opened"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: "2026-01-01T00:00:00.000Z",
+      threadId: asThreadId("thread-1"),
+      requestId: ApprovalRequestId.make("req-permissions"),
+      payload: {
+        requestType: "permissions_approval",
+        detail: "Allow Finder access",
+      },
+    });
+
+    const thread = await waitForThread(harness.readModel, (entry) =>
+      entry.activities.some((activity) => activity.id === "evt-permissions-opened"),
+    );
+    const requested = thread.activities.find(
+      (activity: ProviderRuntimeTestActivity) => activity.id === "evt-permissions-opened",
+    );
+    expect(requested?.summary).toBe("Permission approval requested");
+    expect(requested?.payload).toMatchObject({
+      requestId: "req-permissions",
+      requestKind: "permissions",
+      requestType: "permissions_approval",
+    });
+  });
+
   it("maps runtime.error into errored session state", async () => {
     const harness = await createHarness();
     const now = "2026-01-01T00:00:00.000Z";

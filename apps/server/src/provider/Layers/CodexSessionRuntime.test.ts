@@ -22,6 +22,7 @@ import {
   isRecoverableThreadResumeError,
   makeMemoryConsolidationNotificationFilter,
   openCodexThread,
+  permissionApprovalResponse,
   toMcpElicitationResponse,
 } from "./CodexSessionRuntime.ts";
 const isCodexAppServerRequestError = Schema.is(CodexErrors.CodexAppServerRequestError);
@@ -40,6 +41,32 @@ describe("CodexSessionRuntimeIdentifierGenerationError", () => {
       error.message,
       "Failed to generate Codex App Server identifier for provider-event.",
     );
+  });
+});
+
+describe("permissionApprovalResponse", () => {
+  const permissions: EffectCodexSchema.PermissionsRequestApprovalParams["permissions"] = {
+    fileSystem: { read: ["/Applications/Finder.app"] },
+  };
+
+  it("grants the exact requested profile for the selected scope", () => {
+    NodeAssert.deepStrictEqual(permissionApprovalResponse(permissions, "accept"), {
+      permissions,
+      scope: "turn",
+    });
+    NodeAssert.deepStrictEqual(permissionApprovalResponse(permissions, "acceptForSession"), {
+      permissions,
+      scope: "session",
+    });
+  });
+
+  it("grants nothing when the request is declined or cancelled", () => {
+    NodeAssert.deepStrictEqual(permissionApprovalResponse(permissions, "decline"), {
+      permissions: {},
+    });
+    NodeAssert.deepStrictEqual(permissionApprovalResponse(permissions, "cancel"), {
+      permissions: {},
+    });
   });
 });
 

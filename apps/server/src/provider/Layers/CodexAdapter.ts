@@ -303,6 +303,8 @@ function toRequestTypeFromMethod(method: string): CanonicalRequestType {
       return "file_read_approval";
     case "item/fileChange/requestApproval":
       return "file_change_approval";
+    case "item/permissions/requestApproval":
+      return "permissions_approval";
     case "mcpServer/elicitation/request":
       return "mcp_elicitation_approval";
     case "applyPatchApproval":
@@ -328,6 +330,8 @@ function toRequestTypeFromKind(kind: ProviderRequestKind | undefined): Canonical
       return "file_read_approval";
     case "file-change":
       return "file_change_approval";
+    case "permissions":
+      return "permissions_approval";
     case "mcp-elicitation":
       return "mcp_elicitation_approval";
     default:
@@ -831,6 +835,13 @@ function mapToRuntimeEvents(
             event.payload,
           );
           return payload?.reason ?? undefined;
+        }
+        case "item/permissions/requestApproval": {
+          const payload = readPayload(
+            EffectCodexSchema.PermissionsRequestApprovalParams,
+            event.payload,
+          );
+          return payload?.reason ?? "Additional permissions requested";
         }
         case "mcpServer/elicitation/request":
           return elicitation?.message;

@@ -162,6 +162,30 @@ describe("derivePendingApprovals", () => {
     ]);
   });
 
+  it("derives permission-profile requests as actionable approvals", () => {
+    const activities = [
+      makeActivity({
+        kind: "approval.requested",
+        summary: "Permission approval requested",
+        tone: "approval",
+        payload: {
+          requestId: "req-permissions",
+          requestType: "permissions_approval",
+          detail: "Allow Finder access",
+        },
+      }),
+    ];
+
+    expect(derivePendingApprovals(activities)).toEqual([
+      {
+        requestId: "req-permissions",
+        requestKind: "permissions",
+        createdAt: "2026-02-23T00:00:00.000Z",
+        detail: "Allow Finder access",
+      },
+    ]);
+  });
+
   it("derives dynamic tool requests as actionable generic approvals", () => {
     const activities: OrchestrationThreadActivity[] = [
       makeActivity({

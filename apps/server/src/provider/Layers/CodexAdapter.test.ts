@@ -1194,6 +1194,41 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
     }),
   );
 
+  it.effect("maps permission-profile requests into canonical approvals", () =>
+    Effect.gen(function* () {
+      const { adapter, runtime } = yield* startLifecycleRuntime();
+      const firstEventFiber = yield* Stream.runHead(adapter.streamEvents).pipe(Effect.forkChild);
+
+      yield* runtime.emit({
+        id: asEventId("evt-permissions"),
+        kind: "request",
+        provider: ProviderDriverKind.make("codex"),
+        threadId: asThreadId("thread-1"),
+        createdAt: "2026-08-24T00:00:00.000Z",
+        method: "item/permissions/requestApproval",
+        requestKind: "permissions",
+        requestId: ApprovalRequestId.make("req-permissions"),
+        turnId: asTurnId("turn-1"),
+        itemId: asItemId("item-1"),
+        payload: {
+          threadId: "provider-thread-1",
+          turnId: "turn-1",
+          itemId: "item-1",
+          cwd: "/tmp/project",
+          startedAtMs: 1,
+          reason: "Allow Finder access",
+          permissions: { fileSystem: { read: ["/Applications/Finder.app"] } },
+        },
+      } satisfies ProviderEvent);
+
+      const firstEvent = yield* Fiber.join(firstEventFiber);
+      NodeAssert.equal(firstEvent._tag, "Some");
+      if (firstEvent._tag !== "Some" || firstEvent.value.type !== "request.opened") return;
+      NodeAssert.equal(firstEvent.value.payload.requestType, "permissions_approval");
+      NodeAssert.equal(firstEvent.value.payload.detail, "Allow Finder access");
+    }),
+  );
+
   it.effect("preserves MCP elicitation type when an app access request resolves", () =>
     Effect.gen(function* () {
       const { adapter, runtime } = yield* startLifecycleRuntime();
