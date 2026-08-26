@@ -20,7 +20,9 @@ export const ComposerPendingApprovalPanel = memo(function ComposerPendingApprova
         ? "Command approval"
         : approval.requestKind === "file-read"
           ? "File read approval"
-          : "File change approval";
+          : approval.requestKind === "permissions"
+            ? "Permission approval"
+            : "File change approval";
   const detailAriaLabel =
     approval.requestKind === "mcp-elicitation"
       ? "App access request"
@@ -28,7 +30,9 @@ export const ComposerPendingApprovalPanel = memo(function ComposerPendingApprova
         ? "Command"
         : approval.requestKind === "file-read"
           ? "File to read"
-          : "File change";
+          : approval.requestKind === "permissions"
+            ? "Requested permissions"
+            : "File change";
 
   return (
     <span

@@ -24,6 +24,9 @@ Providers enforce permissions differently. Some read-only actions can proceed in
 **Auto** uses automatic review on Codex, Claude, and Cursor; providers without an equivalent,
 including OpenCode and Antigravity, fall back to asking.
 
+Requests for additional computer, filesystem, or network access appear as inline approvals too,
+including in **Auto** mode. Approve or reject the request to continue.
+
 For Grok, **Always allow this session** remembers the matching command or tool input. Other
 actions still require approval.
 

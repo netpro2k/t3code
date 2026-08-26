@@ -100,6 +100,31 @@ describe("pending approvals", () => {
     ]);
   });
 
+  it("shows permission profiles and removes them after another client responds", () => {
+    const requested = makeActivity({
+      kind: "approval.requested",
+      payload: {
+        requestId: "permissions-1",
+        requestType: "permissions_approval",
+        detail: "Allow Finder access",
+      },
+    });
+    expect(derivePendingRequests([requested]).approvals).toEqual([
+      {
+        requestId: "permissions-1",
+        requestKind: "permissions",
+        createdAt: requested.createdAt,
+        detail: "Allow Finder access",
+      },
+    ]);
+    const resolved = makeActivity({
+      kind: "approval.resolved",
+      createdAt: "2026-02-23T00:00:01.000Z",
+      payload: { requestId: "permissions-1", decision: "decline" },
+    });
+    expect(derivePendingRequests([requested, resolved]).approvals).toEqual([]);
+  });
+
   it("maps canonical requestType payloads into pending approvals", () => {
     const activities: OrchestrationThreadActivity[] = [
       makeActivity({
