@@ -213,6 +213,7 @@ import {
   readTailscaleStatus,
 } from "@t3tools/tailscale";
 import * as ServerActivation from "./serverActivation.ts";
+import * as DesktopLocalSession from "./auth/DesktopLocalSession.ts";
 
 // Escaped MCP handoff provenance can exceed find-my-way's 100-character segment default.
 const HTTP_ROUTER_CONFIG = {
@@ -1169,6 +1170,7 @@ const layerMakeServer = Layer.unwrap(
       layerTailscaleServe,
       layerCloudDesiredLinkReconcile,
       HeapSnapshot.layer,
+      DesktopLocalSession.layerWorker,
     );
 
     return layerServerApplication.pipe(
