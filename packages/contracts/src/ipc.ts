@@ -562,6 +562,17 @@ export const DesktopWslStateSchema = Schema.Struct({
   preflightError: Schema.NullOr(Schema.String),
 });
 
+export interface DesktopExistingLocalBackendState {
+  // True when this launch attached to its required background server.
+  attached: boolean;
+  origin: string | null;
+}
+
+export const DesktopExistingLocalBackendStateSchema = Schema.Struct({
+  attached: Schema.Boolean,
+  origin: Schema.NullOr(Schema.String),
+});
+
 export type DesktopPreviewNavStatus =
   | { kind: "Idle" }
   | { kind: "Loading"; url: string; title: string }
@@ -1083,6 +1094,7 @@ export interface DesktopBridge {
   setWslBackendEnabled: (enabled: boolean) => Promise<DesktopWslState>;
   setWslDistro: (distro: string | null) => Promise<DesktopWslState>;
   setWslOnly: (enabled: boolean) => Promise<DesktopWslState>;
+  getExistingLocalBackendState?: () => Promise<DesktopExistingLocalBackendState>;
   pickFolder: (options?: PickFolderOptions) => Promise<string | null>;
   pickProjectFavicon: (initialPath?: string) => Promise<string | null>;
   pickThemeFiles: () => Promise<readonly PickedThemeFile[] | null>;
