@@ -8,6 +8,7 @@ import * as Duration from "effect/Duration";
 import * as Mac from "effect/crypto/Mac";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as FileSystem from "effect/FileSystem";
 import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
 import * as Schedule from "effect/Schedule";
@@ -16,6 +17,7 @@ import * as Semaphore from "effect/Semaphore";
 import * as HttpClient from "effect/http/HttpClient";
 
 import * as DesktopBackendPool from "./DesktopBackendPool.ts";
+import { readAttachedSessionToken } from "./DesktopAttachedSession.ts";
 
 const BOOTSTRAP_TRANSIENT_RETRY_TIMEOUT = Duration.seconds(15);
 const BOOTSTRAP_TRANSIENT_RETRY_INTERVAL = Duration.millis(500);
@@ -66,10 +68,19 @@ export class DesktopLocalEnvironmentAuth extends Context.Service<
 
 /** @public */
 export const make = Effect.gen(function* () {
+  const fs = yield* FileSystem.FileSystem;
   const pool = yield* DesktopBackendPool.DesktopBackendPool;
   const httpClient = yield* HttpClient.HttpClient;
   const mac = yield* Mac.Mac;
   const tokenRef = yield* Ref.make(Option.none<string>());
+  const attachedTokenRef = yield* Ref.make(
+    Option.none<{
+      readonly path: string;
+      readonly origin: string;
+      readonly token: string;
+      readonly refreshAfter: number;
+    }>(),
+  );
   const mutex = yield* Semaphore.make(1);
 
   const getBearerToken = mutex
@@ -90,6 +101,40 @@ export const make = Effect.gen(function* () {
           return yield* new DesktopLocalEnvironmentAuthBackendNotConfiguredError();
         }
         const config = configOption.value;
+        if (config.attachedPid !== undefined) {
+          if (config.attachedSessionPath) {
+            const now = yield* Clock.currentTimeMillis;
+            const cachedAttached = yield* Ref.get(attachedTokenRef);
+            if (
+              Option.isSome(cachedAttached) &&
+              cachedAttached.value.path === config.attachedSessionPath &&
+              cachedAttached.value.origin === config.httpBaseUrl.href &&
+              cachedAttached.value.refreshAfter > now
+            ) {
+              return cachedAttached.value.token;
+            }
+            const token = yield* readAttachedSessionToken(
+              config.attachedSessionPath,
+              config.httpBaseUrl.href,
+            ).pipe(
+              Effect.provideService(FileSystem.FileSystem, fs),
+              Effect.provideService(HttpClient.HttpClient, httpClient),
+            );
+            if (Option.isNone(token))
+              return yield* new DesktopLocalEnvironmentAuthBackendNotConfiguredError();
+            yield* Ref.set(
+              attachedTokenRef,
+              Option.some({
+                path: config.attachedSessionPath,
+                origin: config.httpBaseUrl.href,
+                token: token.value,
+                refreshAfter: now + Duration.toMillis(Duration.minutes(5)),
+              }),
+            );
+            return token.value;
+          }
+          return yield* new DesktopLocalEnvironmentAuthBackendNotConfiguredError();
+        }
         // Secret-authenticated backends accept the current window token; the launch token may be stale.
         const secret = config.bootstrap.desktopBootstrapSecret;
         const credential =

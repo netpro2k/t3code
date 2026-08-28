@@ -11,6 +11,7 @@ import * as ManagedRuntime from "effect/ManagedRuntime";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Stream from "effect/Stream";
+import * as Schema from "effect/Schema";
 import { ChildProcessSpawner } from "effect/process";
 
 import * as DesktopEnvironment from "../app/DesktopEnvironment.ts";
@@ -22,6 +23,8 @@ import * as DesktopServerExposure from "./DesktopServerExposure.ts";
 import * as DesktopAppSettings from "../settings/DesktopAppSettings.ts";
 import * as DesktopWslEnvironment from "../wsl/DesktopWslEnvironment.ts";
 import * as DesktopWslServerTree from "../wsl/DesktopWslServerTree.ts";
+
+const encodeJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 
 const layerShellEnvironment = (prepared = true) =>
   Layer.succeed(DesktopShellEnvironment.DesktopShellEnvironment, {
@@ -218,6 +221,113 @@ const withPackagedWslHarness = <A, E, R>(
   }).pipe(Effect.scoped, Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)));
 
 describe("DesktopBackendConfiguration", () => {
+  it.effect("requires a provisioned session before attaching to the packaged backend", () =>
+    withHarness(
+      Effect.gen(function* () {
+        const server = yield* Effect.acquireRelease(
+          Effect.callback<NodeHttp.Server>((resume) => {
+            const server = NodeHttp.createServer((request, response) => {
+              response.setHeader("content-type", "application/json");
+              if (request.url === "/.well-known/t3/environment") {
+                response.end(
+                  encodeJson({
+                    environmentId: "attached-environment",
+                    label: "Local",
+                    platform: { os: "darwin", arch: "arm64" },
+                    serverVersion: "0.0.39",
+                    capabilities: { repositoryIdentity: true },
+                  }),
+                );
+              } else if (
+                request.url === "/api/auth/session" &&
+                request.headers.authorization === "Bearer saved-session"
+              ) {
+                response.end(
+                  encodeJson({
+                    authenticated: true,
+                    ...authScopeResponse(AuthStandardClientScopes),
+                    auth: {
+                      policy: "remote-reachable",
+                      bootstrapMethods: ["one-time-token"],
+                      sessionMethods: ["bearer-access-token"],
+                      sessionCookieName: "t3_session",
+                    },
+                  }),
+                );
+              } else {
+                response.writeHead(401);
+                response.end();
+              }
+            });
+            server.listen(0, "127.0.0.1", () => resume(Effect.succeed(server)));
+          }),
+          (server) => Effect.sync(() => server.close()),
+        );
+        const address = server.address();
+        assert(address !== null && typeof address !== "string");
+        const origin = `http://127.0.0.1:${address.port}`;
+        const env = yield* DesktopEnvironment.DesktopEnvironment;
+        const fs = yield* FileSystem.FileSystem;
+        const configuration = yield* DesktopBackendConfiguration.DesktopBackendConfiguration;
+        yield* fs.makeDirectory(env.stateDir, { recursive: true });
+        yield* fs.writeFileString(
+          env.path.join(env.stateDir, "server-runtime.json"),
+          encodeJson({
+            version: 1,
+            pid: process.pid,
+            port: address.port,
+            origin,
+            startedAt: "2026-09-10T00:00:00Z",
+          }),
+        );
+        const missing = yield* configuration.resolvePrimary;
+        assert.equal(Option.getOrThrow(missing.preflightFailure).fatal, true);
+        assert.include(
+          Option.getOrThrow(missing.preflightFailure).reason,
+          "local Desktop credentials",
+        );
+        assert.equal(
+          missing.attachedSessionPath,
+          env.path.join(env.stateDir, "desktop-session.json"),
+        );
+
+        yield* fs.writeFileString(
+          env.path.join(env.stateDir, "desktop-session.json"),
+          encodeJson({
+            sessionId: "local-desktop",
+            token: "saved-session",
+            expiresAt: "2100-01-01T00:00:00Z",
+          }),
+        );
+        const attached = yield* configuration.resolvePrimary;
+        assert.isTrue(Option.isNone(attached.preflightFailure));
+        assert.equal(attached.attachedPid, process.pid);
+        assert.equal(
+          attached.attachedSessionPath,
+          env.path.join(env.stateDir, "desktop-session.json"),
+        );
+        assert.equal(attached.httpBaseUrl.origin, origin);
+
+        // The service can disappear while its launcher applies an update.
+        const runtimePath = env.path.join(env.stateDir, "server-runtime.json");
+        const runtimeState = yield* fs.readFileString(runtimePath);
+        yield* fs.remove(runtimePath);
+        const unavailable = yield* configuration.resolvePrimary;
+        assert.isUndefined(unavailable.attachedPid);
+        const failure = Option.getOrThrow(unavailable.preflightFailure);
+        assert.isFalse(failure.fatal);
+        assert.isUndefined(failure.retryLimit);
+        assert.equal(failure.kind, "existing-local-backend");
+
+        yield* fs.writeFileString(runtimePath, runtimeState);
+        const recovered = yield* configuration.resolvePrimary;
+        assert.isTrue(Option.isNone(recovered.preflightFailure));
+        assert.equal(recovered.attachedPid, process.pid);
+        assert.equal(recovered.httpBaseUrl.origin, origin);
+      }),
+    ),
+  );
+
   it.effect("resolvePrimary produces a stable scoped bootstrap token", () =>
     withHarness(
       Effect.gen(function* () {
@@ -264,6 +374,14 @@ describe("DesktopBackendConfiguration", () => {
         assert.equal(
           yield* configuration.currentBootstrapToken,
           first.bootstrap.desktopBootstrapToken,
+        );
+        assert.isUndefined(first.attachedPid);
+        const preflightFailure = Option.getOrThrow(first.preflightFailure);
+        assert.equal(preflightFailure.kind, "existing-local-backend");
+        assert.equal(preflightFailure.fatal, false);
+        assert.include(
+          preflightFailure.reason,
+          "waiting for the separately managed background server",
         );
       }),
     ),
@@ -968,3 +1086,7 @@ describe("DesktopBackendConfiguration", () => {
     }
   });
 });
+// @effect-diagnostics nodeBuiltinImport:off
+import * as NodeHttp from "node:http";
+
+import { AuthStandardClientScopes, authScopeResponse } from "@t3tools/contracts";

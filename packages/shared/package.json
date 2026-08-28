@@ -19,6 +19,10 @@
       "types": "./src/orchestrationV2ThreadError.ts",
       "import": "./src/orchestrationV2ThreadError.ts"
     },
+    "./desktopLocalSession": {
+      "types": "./src/desktopLocalSession.ts",
+      "import": "./src/desktopLocalSession.ts"
+    },
     "./delimitedPreview": {
       "types": "./src/delimitedPreview.ts",
       "import": "./src/delimitedPreview.ts"
