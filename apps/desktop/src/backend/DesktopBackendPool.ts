@@ -236,6 +236,13 @@ export const layer = Layer.effect(
     const handlePrimaryPreflightFailure = Effect.fn("desktop.backendPool.primaryPreflightFailed")(
       function* (failure: DesktopBackendManager.PreflightFailure) {
         const { reason, fatal } = failure;
+        if (failure.kind === "existing-local-backend") {
+          yield* logBackendPoolWarning("could not attach to the running local server", {
+            reason,
+          });
+          yield* electronDialog.showErrorBox("Could not use the running local server", reason);
+          return false;
+        }
         if (!fatal) {
           yield* logBackendPoolWarning(
             "primary WSL preflight retry window exhausted; using Windows for this launch",

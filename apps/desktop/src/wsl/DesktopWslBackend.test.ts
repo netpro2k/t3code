@@ -71,6 +71,7 @@ const backendConfigurationLayer = Layer.succeed(
     resolvePrimary: Effect.die("unexpected resolvePrimary"),
     resolvePrimaryLabel: Effect.succeed("Windows"),
     resolveWsl: () => Effect.die("unexpected resolveWsl"),
+    resolveExistingLocalBackend: Effect.succeed(Option.none()),
   } satisfies DesktopBackendConfiguration.DesktopBackendConfiguration["Service"],
 );
 

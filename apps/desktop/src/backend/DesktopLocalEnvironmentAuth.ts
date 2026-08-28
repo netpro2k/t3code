@@ -64,6 +64,12 @@ export const make = Effect.gen(function* () {
           return yield* new DesktopLocalEnvironmentAuthBackendNotConfiguredError();
         }
         const config = configOption.value;
+        if (config.attachedPid !== undefined) {
+          if (!config.attachedBearerToken) {
+            return yield* new DesktopLocalEnvironmentAuthBackendNotConfiguredError();
+          }
+          return config.attachedBearerToken;
+        }
         const credential = config.bootstrap.desktopBootstrapToken;
         if (!credential) {
           return yield* new DesktopLocalEnvironmentAuthBackendNotConfiguredError();
