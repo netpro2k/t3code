@@ -187,3 +187,18 @@ If you upgraded from a version before 0.1.0, its database (`state.sqlite`) is
 still kept next to the current one so you can roll back. `t3 doctor` offers to
 delete it, but never selects that repair for you and `--fix` skips it: once it
 is gone, a version before 0.1.0 starts with no threads or settings.
+
+## Using the Desktop App With the Service
+
+On macOS and Linux, the packaged desktop app requires this background server and always attaches to
+it. Desktop never starts another backend against the same data directory; process lifetime and
+network exposure stay with the launch agent or systemd user unit.
+
+The initial installation saves a private local credential for Desktop. The background server renews
+it automatically before its 30-day expiry, including after a long shutdown. Desktop picks up a new
+credential while running, and closing Desktop leaves the server and its sessions available.
+
+If the service is missing or unreachable, Desktop shows a startup error. Start or restart the
+service, then relaunch Desktop. If the saved credential is missing, corrupt, or revoked, repair the
+local installation before reopening Desktop. Revoked sessions are not automatically renewed.
+Desktop never starts a second server to recover from an authentication failure.

@@ -98,6 +98,7 @@ import {
 } from "~/state/desktopNetworkAccess";
 import { desktopWslStateAtom, refreshDesktopWslState } from "~/state/desktopWslState";
 import { useDesktopUpdateState } from "~/state/desktopUpdate";
+import { desktopExistingLocalBackendStateAtom } from "~/state/desktopExistingLocalBackend";
 import {
   type EnvironmentPresentation,
   useEnvironments,
@@ -307,6 +308,12 @@ export function ConnectionsSettings({ view }: { readonly view: "environments" | 
   const desktopWsl = useEnvironmentQuery(
     showsAccess && canManageLocalBackend && desktopBridge ? desktopWslStateAtom : null,
   );
+  const desktopExistingLocalBackend = useEnvironmentQuery(
+    canManageLocalBackend && desktopBridge?.getExistingLocalBackendState
+      ? desktopExistingLocalBackendStateAtom
+      : null,
+  );
+  const desktopExistingLocalBackendState = desktopExistingLocalBackend.data;
   const desktopWslState = desktopWsl.data;
   const desktopWslError = desktopWslMutationError ?? desktopWsl.error;
   const isLoadingWslState = desktopWsl.isPending && desktopWsl.data === null;
@@ -963,6 +970,7 @@ export function ConnectionsSettings({ view }: { readonly view: "environments" | 
       {renderPairingClientsList(visibleDesktopPairingLinks, desktopClientSessions)}
     </>
   );
+  const isAttachedToExistingLocalBackend = desktopExistingLocalBackendState?.attached === true;
   const renderNetworkAccessRow = () => (
     <SettingsRow
       title={searchableSetting("network-access").title}
@@ -1128,9 +1136,11 @@ export function ConnectionsSettings({ view }: { readonly view: "environments" | 
             ) : null}
             {canManageLocalBackend && desktopBridge ? (
               <>
-                {renderNetworkAccessRow()}
-                {renderEndpointRows()}
-                {renderTailscaleRow()}
+                {isAttachedToExistingLocalBackend
+                  ? renderDisabledNetworkAccessRow()
+                  : renderNetworkAccessRow()}
+                {isAttachedToExistingLocalBackend ? null : renderEndpointRows()}
+                {isAttachedToExistingLocalBackend ? null : renderTailscaleRow()}
                 {renderWslRow()}
                 {canReadRelay || canManageRelay ? (
                   <CloudLinkRow canReadRelay={canReadRelay} canManageRelay={canManageRelay} />

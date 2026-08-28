@@ -1,14 +1,21 @@
-import { assert, describe, it } from "@effect/vitest";
+import { assert, it } from "@effect/vitest";
 import * as Deferred from "effect/Deferred";
+import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
+import * as FileSystem from "effect/FileSystem";
+import * as Path from "effect/Path";
 import * as Layer from "effect/Layer";
 import * as Ref from "effect/Ref";
 import * as HttpClient from "effect/http/HttpClient";
 import * as HttpClientRequest from "effect/http/HttpClientRequest";
 import * as HttpClientResponse from "effect/http/HttpClientResponse";
-import { PRIMARY_LOCAL_ENVIRONMENT_ID } from "@t3tools/contracts";
+import {
+  PRIMARY_LOCAL_ENVIRONMENT_ID,
+  AuthStandardClientScopes,
+  authScopeResponse,
+} from "@t3tools/contracts";
 import {
   DESKTOP_BOOTSTRAP_TOKEN_WINDOW_MS,
   currentDesktopBootstrapToken,
@@ -37,7 +44,74 @@ const config = {
   captureOutput: true,
 };
 
-describe("DesktopLocalEnvironmentAuth", () => {
+it.layer(NodeServices.layer)("DesktopLocalEnvironmentAuth", (it) => {
+  it.effect("picks up renewed attached sessions without exchanging bootstrap credentials", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const directory = yield* fs.makeTempDirectoryScoped({ prefix: "t3-desktop-token-" });
+      const sessionPath = path.join(directory, "desktop-session.json");
+      const save = (token: string) =>
+        fs.writeFileString(
+          sessionPath,
+          JSON.stringify({
+            sessionId: token,
+            token,
+            expiresAt: "2100-01-01T00:00:00Z",
+          }),
+        );
+      yield* save("provisioned-bearer");
+      let requests = 0;
+      const poolLayer = Layer.succeed(DesktopBackendPool.DesktopBackendPool, {
+        list: Effect.succeed([
+          {
+            id: PRIMARY_LOCAL_ENVIRONMENT_ID,
+            waitForReady: () => Effect.succeed(true),
+            currentConfig: Effect.succeedSome({
+              ...config,
+              attachedPid: 123,
+              attachedSessionPath: sessionPath,
+            }),
+          },
+        ]),
+      } as unknown as DesktopBackendPool.DesktopBackendPool["Service"]);
+      const auth = yield* DesktopLocalEnvironmentAuth.make.pipe(
+        Effect.provide(poolLayer),
+        Effect.provideService(
+          HttpClient.HttpClient,
+          HttpClient.make((request) => {
+            assert.equal(request.method, "GET");
+            assert.equal(request.url, "http://127.0.0.1:3773/api/auth/session");
+            requests++;
+            return Effect.succeed(
+              HttpClientResponse.fromWeb(
+                request,
+                Response.json({
+                  authenticated: true,
+                  ...authScopeResponse(AuthStandardClientScopes),
+                  sessionMethod: "bearer-access-token",
+                  auth: {
+                    policy: "remote-reachable",
+                    bootstrapMethods: ["one-time-token"],
+                    sessionMethods: ["bearer-access-token"],
+                    sessionCookieName: "t3_session",
+                  },
+                }),
+              ),
+            );
+          }),
+        ),
+      );
+      assert.equal(yield* auth.getBearerToken, "provisioned-bearer");
+      yield* save("renewed-bearer");
+      assert.equal(yield* auth.getBearerToken, "provisioned-bearer");
+      assert.equal(requests, 1);
+      yield* TestClock.adjust(Duration.minutes(5));
+      assert.equal(yield* auth.getBearerToken, "renewed-bearer");
+      assert.equal(requests, 2);
+    }),
+  );
+
   it.effect("exchanges the desktop bootstrap credential only once", () =>
     Effect.gen(function* () {
       const requestCount = yield* Ref.make(0);

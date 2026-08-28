@@ -1,5 +1,6 @@
 import * as Brand from "effect/Brand";
 import * as Cause from "effect/Cause";
+import * as Deferred from "effect/Deferred";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
@@ -42,6 +43,7 @@ const DEFAULT_BACKEND_READINESS_REQUEST_TIMEOUT = Duration.seconds(1);
 // Match the service launcher's grace period so backends can stop provider sessions.
 const DEFAULT_BACKEND_TERMINATE_GRACE = Duration.seconds(5);
 const DEFAULT_BACKEND_OUTPUT_DRAIN_TIMEOUT = Duration.seconds(5);
+const ATTACHED_BACKEND_HEALTH_INTERVAL = Duration.seconds(2);
 const BACKEND_READINESS_PATH = "/.well-known/t3/environment";
 // Three restarts without readiness is about 2 s of backoff: past a blip, early enough to help.
 const STARTUP_FAILURE_RESTART_ATTEMPTS = 3;
@@ -76,12 +78,17 @@ export interface DesktopBackendStartConfig extends BackendProcessContext {
   readonly preflightFailure: Option.Option<PreflightFailure>;
   readonly runningDistro?: string;
   readonly wslRuntimeId?: string;
+  // When set, this instance watches a server that is already running
+  // instead of spawning a child process. Stop does not kill that pid.
+  readonly attachedPid?: number;
+  readonly attachedSessionPath?: string;
 }
 
 export interface PreflightFailure {
   readonly reason: string;
   readonly fatal: boolean;
   readonly retryLimit?: number;
+  readonly kind?: "wsl" | "existing-local-backend";
 }
 
 interface BackendProcessExit {
@@ -609,6 +616,56 @@ export const runBackendProcess = Effect.fn("runBackendProcess")(function* (
   return exit.value;
 });
 
+const runAttachedBackend = Effect.fn("runAttachedBackend")(function* (
+  options: RunBackendProcessOptions & { readonly attachedPid: number },
+): Effect.fn.Return<BackendProcessExit, never, HttpClient.HttpClient | Scope.Scope> {
+  const scope = yield* Scope.Scope;
+  const stopRequested = yield* Deferred.make<void>();
+  yield* Scope.addFinalizer(scope, Deferred.succeed(stopRequested, undefined).pipe(Effect.asVoid));
+  yield* options.onStarted?.(options.attachedPid) ?? Effect.void;
+
+  const probeContext = {
+    executablePath: options.executablePath,
+    entryPath: options.entryPath,
+    cwd: options.cwd,
+    httpBaseUrl: options.httpBaseUrl,
+  };
+  const probeReadiness = waitForHttpReady({
+    ...probeContext,
+    timeout: options.readinessTimeout ?? DEFAULT_BACKEND_READINESS_TIMEOUT,
+  }).pipe(
+    Effect.flatMap(() => options.onReady?.() ?? Effect.void),
+    Effect.as(true),
+    Effect.catchTags({
+      BackendReadinessTimeoutError: (error) =>
+        (options.onReadinessFailure?.(error) ?? Effect.void).pipe(Effect.as(false)),
+    }),
+  );
+
+  yield* probeReadiness.pipe(Effect.repeat({ while: (ready) => !ready }));
+
+  const healthProbe = waitForHttpReady({
+    ...probeContext,
+    timeout: ATTACHED_BACKEND_HEALTH_INTERVAL,
+  });
+  const reason = yield* Effect.raceFirst(
+    healthProbe.pipe(
+      Effect.andThen(Effect.sleep(ATTACHED_BACKEND_HEALTH_INTERVAL)),
+      Effect.forever,
+      Effect.ignore,
+      Effect.as(`attached pid=${options.attachedPid} became unreachable`),
+    ),
+    Deferred.await(stopRequested).pipe(
+      Effect.as(`attached pid=${options.attachedPid} monitor stopped`),
+    ),
+  );
+  yield* options.onExitObserved?.() ?? Effect.void;
+  return {
+    code: Option.none(),
+    reason,
+  } satisfies BackendProcessExit;
+});
+
 export const makeBackendInstance = Effect.fn("makeBackendInstance")(function* (
   spec: BackendInstanceSpec,
 ): Effect.fn.Return<
@@ -781,7 +838,7 @@ export const makeBackendInstance = Effect.fn("makeBackendInstance")(function* (
           latest.preflightFailureAttempt === 0 ? latest : { ...latest, preflightFailureAttempt: 0 },
         );
 
-        if (!entryExists) {
+        if (!entryExists && config.value.attachedPid === undefined) {
           yield* scheduleRestart(`missing server entry at ${config.value.entryPath}`);
           return;
         }
@@ -891,14 +948,14 @@ export const makeBackendInstance = Effect.fn("makeBackendInstance")(function* (
           );
         });
 
-        const program = runBackendProcess({
+        const processOptions = {
           ...config.value,
           desktopTelemetryStream: desktopTelemetryPublisher.encoded,
           desktopBrowserStream: desktopBrowserHost.events,
           onDesktopBrowserCommand: desktopBrowserHost.handleCommandLine,
-          onDesktopTelemetryControl: (message) =>
+          onDesktopTelemetryControl: (message: DesktopTelemetryControlMessageValue) =>
             desktopTelemetryPublisher.handleControlForSource(spec.id, message),
-          onStarted: Effect.fn("desktop.backendInstance.onStarted")(function* (pid) {
+          onStarted: Effect.fn("desktop.backendInstance.onStarted")(function* (pid: number) {
             yield* updateActiveRun(runId, (run) => ({
               ...run,
               pid: Option.some(pid),
@@ -906,7 +963,9 @@ export const makeBackendInstance = Effect.fn("makeBackendInstance")(function* (
             yield* Ref.set(outputTail, "");
             outputDecoders = makeOutputDecoders();
             yield* backendOutputLog.beginSession({
-              details: `pid=${pid} port=${config.value.bootstrap.port} cwd=${config.value.cwd}`,
+              details: `pid=${pid} port=${config.value.bootstrap.port} cwd=${config.value.cwd}${
+                config.value.attachedPid === undefined ? "" : " attached"
+              }`,
             });
           }),
           onExitObserved: () =>
@@ -945,26 +1004,33 @@ export const makeBackendInstance = Effect.fn("makeBackendInstance")(function* (
               );
             }
           }),
-          onReadinessFailure: Effect.fn("desktop.backendInstance.onReadinessFailure")(
-            function* (error) {
-              yield* logInstanceWarning("backend readiness check failed during bootstrap", {
-                error: error.message,
-              });
-              yield* backendOutputLog.persistFailureSnapshot({
-                details: error.message,
-              });
-              yield* reportStartupFailure("The server started but did not become ready in time.");
-            },
-          ),
-          onOutput: (streamName, chunk) =>
+          onReadinessFailure: Effect.fn("desktop.backendInstance.onReadinessFailure")(function* (
+            error: BackendReadinessTimeoutError,
+          ) {
+            yield* logInstanceWarning("backend readiness check failed during bootstrap", {
+              error: error.message,
+            });
+            yield* backendOutputLog.persistFailureSnapshot({
+              details: error.message,
+            });
+            yield* reportStartupFailure("The server started but did not become ready in time.");
+          }),
+          onOutput: (streamName: BackendProcessOutputStream, chunk: Uint8Array) =>
             Ref.update(outputTail, (tail) =>
               // A cut through a surrogate pair would make encodeURIComponent throw when rendering.
               (tail + outputDecoders[streamName].decode(chunk, { stream: true }))
                 .slice(-STARTUP_FAILURE_OUTPUT_CHARS)
                 .toWellFormed(),
             ).pipe(Effect.andThen(backendOutputLog.writeOutputChunk(streamName, chunk))),
-        }).pipe(
-          Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+        };
+        const attachedPid = config.value.attachedPid;
+        const program = (
+          attachedPid === undefined
+            ? runBackendProcess(processOptions).pipe(
+                Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+              )
+            : runAttachedBackend({ ...processOptions, attachedPid })
+        ).pipe(
           Effect.provideService(HttpClient.HttpClient, httpClient),
           Scope.provide(runScope),
           Effect.matchEffect({
