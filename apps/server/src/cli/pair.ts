@@ -344,6 +344,7 @@ const makePairServerConfig = Effect.fn(function* (input: {
     noBrowser: true,
     startupPresentation: "headless",
     desktopBootstrapToken: undefined,
+    desktopAttachToken: undefined,
     desktopTelemetryFd: undefined,
     desktopTelemetryControlFd: undefined,
     resourceMonitorPath: undefined,

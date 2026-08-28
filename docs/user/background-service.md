@@ -71,3 +71,13 @@ background. This is only an onboarding shortcut: the service and T3 Connect are 
 
 Signing out of T3 Connect does not remove the service. Use `t3 service uninstall` when you no longer
 want T3 Code to start in the background.
+
+## Using the Desktop App With the Service
+
+On macOS and Linux, the packaged desktop app requires this background server and always attaches to
+it. Desktop never starts another backend against the same data directory; process lifetime and
+network exposure stay with the launch agent or systemd user unit.
+
+If the service is missing, unreachable, or too old to advertise Desktop attachment credentials,
+Desktop fails closed instead of opening the database itself. Update and restart the service, then
+relaunch Desktop.

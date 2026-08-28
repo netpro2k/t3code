@@ -253,6 +253,14 @@ describe("DesktopBackendConfiguration", () => {
         assert.equal(first.bootstrap.tailscaleServePort, 8443);
         assert.match(first.bootstrap.desktopBootstrapToken, /^[0-9a-f]{48}$/i);
         assert.equal(second.bootstrap.desktopBootstrapToken, first.bootstrap.desktopBootstrapToken);
+        assert.isUndefined(first.attachedPid);
+        const preflightFailure = Option.getOrThrow(first.preflightFailure);
+        assert.equal(preflightFailure.kind, "existing-local-backend");
+        assert.equal(preflightFailure.fatal, true);
+        assert.include(
+          preflightFailure.reason,
+          "requires the separately managed background server",
+        );
       }),
     ),
   );
@@ -845,6 +853,7 @@ describe("DesktopBackendConfiguration", () => {
         const configuration = yield* DesktopBackendConfiguration.DesktopBackendConfiguration;
         const config = yield* configuration.resolvePrimary;
         assert.equal(config.captureOutput, true);
+        assert.isTrue(Option.isNone(config.preflightFailure));
       }).pipe(
         Effect.provide(
           DesktopBackendConfiguration.layer.pipe(

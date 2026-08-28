@@ -15,6 +15,7 @@ import * as DesktopAppIdentity from "./DesktopAppIdentity.ts";
 import * as DesktopClerk from "./DesktopClerk.ts";
 import * as DesktopApplicationMenu from "../window/DesktopApplicationMenu.ts";
 import * as DesktopWindow from "../window/DesktopWindow.ts";
+import * as DesktopBackendConfiguration from "../backend/DesktopBackendConfiguration.ts";
 import * as DesktopBackendPool from "../backend/DesktopBackendPool.ts";
 import * as DesktopEnvironment from "./DesktopEnvironment.ts";
 import * as DesktopLifecycle from "./DesktopLifecycle.ts";
@@ -174,18 +175,25 @@ const bootstrap = Effect.gen(function* () {
   }
   const serverExposureState = yield* serverExposure.configureFromSettings({ port: backendPort });
   const backendConfig = yield* serverExposure.backendConfig;
+  const backendConfiguration = yield* DesktopBackendConfiguration.DesktopBackendConfiguration;
+  const existingLocalBackend = yield* backendConfiguration.resolveExistingLocalBackend;
+  const attachedOrigin = Option.flatMap(existingLocalBackend, (backend) =>
+    backend.desktopAttachToken === null ? Option.none() : Option.some(new URL(backend.origin)),
+  );
+  const backendOrigin = Option.getOrElse(attachedOrigin, () => backendConfig.httpBaseUrl);
   const electronProtocol = yield* ElectronProtocol.ElectronProtocol;
   const rendererTarget = environment.isDevelopment
     ? Option.getOrThrow(environment.devServerUrl)
-    : backendConfig.httpBaseUrl;
+    : backendOrigin;
   yield* electronProtocol.registerDesktopProtocol({
     scheme: ElectronProtocol.getDesktopScheme(environment.isDevelopment),
     targetOrigin: rendererTarget,
-    backendOrigin: backendConfig.httpBaseUrl,
+    backendOrigin,
     clerkFrontendApiHostname: DesktopClerk.desktopClerkFrontendApiHostname,
   });
   yield* logBootstrapInfo("bootstrap resolved backend endpoint", {
-    baseUrl: backendConfig.httpBaseUrl.href,
+    baseUrl: backendOrigin.href,
+    ...(Option.isSome(attachedOrigin) ? { attached: true } : {}),
   });
   if (serverExposureState.endpointUrl) {
     yield* logBootstrapInfo("bootstrap enabled network access", {

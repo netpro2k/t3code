@@ -548,6 +548,17 @@ export const DesktopWslStateSchema = Schema.Struct({
   preflightError: Schema.NullOr(Schema.String),
 });
 
+export interface DesktopExistingLocalBackendState {
+  // True when this launch attached to its required background server.
+  attached: boolean;
+  origin: string | null;
+}
+
+export const DesktopExistingLocalBackendStateSchema = Schema.Struct({
+  attached: Schema.Boolean,
+  origin: Schema.NullOr(Schema.String),
+});
+
 /**
  * Renderer-facing snapshot of a desktop preview tab. Mirrors the main-process
  * PreviewTabState shape but uses serialisable primitives only.
@@ -1161,6 +1172,7 @@ export interface DesktopBridge {
   setWslBackendEnabled: (enabled: boolean) => Promise<DesktopWslState>;
   setWslDistro: (distro: string | null) => Promise<DesktopWslState>;
   setWslOnly: (enabled: boolean) => Promise<DesktopWslState>;
+  getExistingLocalBackendState?: () => Promise<DesktopExistingLocalBackendState>;
   pickFolder: (options?: PickFolderOptions) => Promise<string | null>;
   /** Optional while older desktop shells can host a newer web client. */
   pickProjectFavicon?: (initialPath?: string) => Promise<string | null>;

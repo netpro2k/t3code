@@ -13,7 +13,9 @@ import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
 import * as PairingGrantStore from "./PairingGrantStore.ts";
 
 const makeServerConfigLayer = (
-  overrides?: Partial<Pick<ServerConfig.ServerConfig["Service"], "desktopBootstrapToken">>,
+  overrides?: Partial<
+    Pick<ServerConfig.ServerConfig["Service"], "desktopBootstrapToken" | "desktopAttachToken">
+  >,
 ) =>
   Layer.effect(
     ServerConfig.ServerConfig,
@@ -29,7 +31,9 @@ const makeServerConfigLayer = (
   );
 
 const makePairingGrantStoreLayer = (
-  overrides?: Partial<Pick<ServerConfig.ServerConfig["Service"], "desktopBootstrapToken">>,
+  overrides?: Partial<
+    Pick<ServerConfig.ServerConfig["Service"], "desktopBootstrapToken" | "desktopAttachToken">
+  >,
 ) =>
   PairingGrantStore.layer.pipe(
     Layer.provide(SqlitePersistenceMemory),
@@ -162,6 +166,25 @@ it.layer(NodeServices.layer)("PairingGrantStore.layer", (it) => {
       Effect.provide(
         makePairingGrantStoreLayer({
           desktopBootstrapToken: "desktop-bootstrap-token",
+        }),
+      ),
+    ),
+  );
+
+  it.effect("seeds a reusable desktop-attach grant from the attach token", () =>
+    Effect.gen(function* () {
+      const bootstrapCredentials = yield* PairingGrantStore.PairingGrantStore;
+      const first = yield* bootstrapCredentials.consume("desktop-attach-token");
+      const second = yield* bootstrapCredentials.consume("desktop-attach-token");
+
+      expect(first.method).toBe("desktop-bootstrap");
+      expect(first.subject).toBe("desktop-attach");
+      expect(first.label).toBe("T3 Code Desktop");
+      expect(second.subject).toBe("desktop-attach");
+    }).pipe(
+      Effect.provide(
+        makePairingGrantStoreLayer({
+          desktopAttachToken: "desktop-attach-token",
         }),
       ),
     ),

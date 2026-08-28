@@ -910,6 +910,48 @@ describe("DesktopBackendManager", () => {
     ),
   );
 
+  it.effect("stops an attached backend monitor without spawning a child process", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const ready = yield* Deferred.make<void>();
+        let shutdownCount = 0;
+        let requestCount = 0;
+        const attachedPid = 456;
+
+        const instance = yield* makeTestInstance({
+          config: { ...baseConfig, attachedPid },
+          spawnerLayer: Layer.succeed(
+            ChildProcessSpawner.ChildProcessSpawner,
+            ChildProcessSpawner.make(() => Effect.die("attached backend must not spawn")),
+          ),
+          httpClientLayer: httpClientLayer((request) =>
+            Effect.sync(() => {
+              requestCount += 1;
+              return responseForRequest(request, 200);
+            }),
+          ),
+          onReady: Deferred.succeed(ready, undefined).pipe(Effect.asVoid),
+          onShutdown: Effect.sync(() => {
+            shutdownCount += 1;
+          }),
+        });
+
+        yield* instance.start;
+        yield* Deferred.await(ready);
+        assert.deepEqual((yield* instance.snapshot).activePid, Option.some(attachedPid));
+
+        yield* instance.stop();
+
+        const stoppedSnapshot = yield* instance.snapshot;
+        assert.isAbove(requestCount, 0);
+        assert.equal(shutdownCount, 1);
+        assert.isFalse(stoppedSnapshot.desiredRunning);
+        assert.isFalse(stoppedSnapshot.ready);
+        assert.isTrue(Option.isNone(stoppedSnapshot.activePid));
+      }),
+    ),
+  );
+
   it.effect("restarts when start is requested during stop teardown", () =>
     Effect.scoped(
       Effect.gen(function* () {

@@ -53,12 +53,23 @@ describe("serverRuntimeState", () => {
 
       assert.equal(state.devUrl, "http://localhost:5733/");
       assert.equal(state.origin, "http://127.0.0.1:13773");
+      assert.isFalse("desktopAttachToken" in state);
 
       const withoutDev = yield* ServerRuntimeState.makePersistedServerRuntimeState({
         config: { host: undefined, devUrl: undefined },
         port: 13_773,
       });
       assert.isFalse("devUrl" in withoutDev);
+
+      const withAttach = yield* ServerRuntimeState.makePersistedServerRuntimeState({
+        config: {
+          host: undefined,
+          devUrl: undefined,
+          desktopAttachToken: "attach-token",
+        },
+        port: 13_773,
+      });
+      assert.equal(withAttach.desktopAttachToken, "attach-token");
     }),
   );
 
