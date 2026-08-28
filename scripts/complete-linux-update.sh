@@ -81,6 +81,7 @@ if [[ -f "$runtime_state_path" ]]; then
   fi
 fi
 
+"$node_path" "$repo_dir/scripts/provision-desktop-session.ts" "$server_entry" "$HOME/.t3"
 mv -f "$unit_tmp" "$HOME/.config/systemd/user/t3code.service"
 systemctl --user daemon-reload
 systemctl --user enable --now t3code.service

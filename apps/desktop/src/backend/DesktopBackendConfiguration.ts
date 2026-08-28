@@ -1,3 +1,5 @@
+import { DESKTOP_LOCAL_SESSION_FILE } from "@t3tools/shared/desktopLocalSession";
+import { readAttachedSessionToken } from "./DesktopAttachedSession.ts";
 import * as NodeOS from "node:os";
 
 import { parsePersistedServerObservabilitySettings } from "@t3tools/shared/serverSettings";
@@ -11,11 +13,13 @@ import * as Option from "effect/Option";
 import * as PlatformError from "effect/PlatformError";
 import * as Schema from "effect/Schema";
 import * as SynchronizedRef from "effect/SynchronizedRef";
+import { FetchHttpClient } from "effect/unstable/http";
 
 import serverPackageJson from "../../../server/package.json" with { type: "json" };
 
 import * as DesktopBackendManager from "./DesktopBackendManager.ts";
 import * as DesktopEnvironment from "../app/DesktopEnvironment.ts";
+import * as DesktopExistingLocalBackend from "./DesktopExistingLocalBackend.ts";
 import * as DesktopServerExposure from "./DesktopServerExposure.ts";
 import * as DesktopAppSettings from "../settings/DesktopAppSettings.ts";
 import * as DesktopWslEnvironment from "../wsl/DesktopWslEnvironment.ts";
@@ -61,6 +65,11 @@ export class DesktopBackendConfiguration extends Context.Service<
     // fall-back to Windows), so the env switcher can't show "WSL" for a
     // backend that actually resolved to Windows.
     readonly resolvePrimaryLabel: Effect.Effect<string>;
+    // Live same-machine server for this desktop home, when one is answering.
+    // None when attach is disabled, this is a dev run, or nothing is listening.
+    readonly resolveExistingLocalBackend: Effect.Effect<
+      Option.Option<DesktopExistingLocalBackend.ExistingLocalBackend>
+    >;
   }
 >()("@t3tools/desktop/backend/DesktopBackendConfiguration") {}
 
@@ -542,6 +551,71 @@ const resolvePrimaryStartConfig = Effect.fn("desktop.backendConfiguration.resolv
   },
 );
 
+const attachedMissingCredentialReason =
+  "Desktop’s saved local session is missing, expired, or no longer valid. Run this fork’s update script to renew it, then relaunch Desktop.";
+
+const requiredLocalBackendUnavailableReason =
+  "T3 Code Desktop requires the separately managed background server for this environment, but no compatible server is reachable. Start or restart the T3 Code LaunchAgent or systemd user unit, then relaunch Desktop.";
+
+const resolveAttachedPrimaryStartConfig = (
+  input: SharedBootstrapInput & {
+    readonly existing: DesktopExistingLocalBackend.ExistingLocalBackend;
+    readonly bearerToken: Option.Option<string>;
+    readonly resourceMonitorPath: Option.Option<string>;
+  },
+): Effect.Effect<
+  DesktopBackendManager.DesktopBackendStartConfig,
+  never,
+  DesktopEnvironment.DesktopEnvironment
+> =>
+  Effect.gen(function* () {
+    const environment = yield* DesktopEnvironment.DesktopEnvironment;
+    const existing = input.existing;
+    const httpBaseUrl = new URL(existing.origin);
+
+    return {
+      executablePath: process.execPath,
+      args: [environment.backendEntryPath, "--bootstrap-fd", "3"],
+      entryPath: environment.backendEntryPath,
+      cwd: environment.backendCwd,
+      env: {
+        ...backendChildEnvPatch(),
+        ELECTRON_RUN_AS_NODE: "1",
+      },
+      extendEnv: true,
+      bootstrap: {
+        mode: "desktop" as const,
+        noBrowser: true,
+        port: existing.port,
+        t3Home: environment.baseDir,
+        host: httpBaseUrl.hostname,
+        desktopBootstrapToken: input.bootstrapToken,
+        tailscaleServeEnabled: false,
+        tailscaleServePort: 443,
+        ...Option.match(input.resourceMonitorPath, {
+          onNone: () => ({}),
+          onSome: (resourceMonitorPath) => ({ resourceMonitorPath }),
+        }),
+        ...buildObservabilityFragment(input.observabilitySettings),
+      },
+      bootstrapDelivery: "fd3" as const,
+      httpBaseUrl,
+      captureOutput: true,
+      preflightFailure: Option.isNone(input.bearerToken)
+        ? Option.some({
+            reason: attachedMissingCredentialReason,
+            fatal: true,
+            kind: "existing-local-backend" as const,
+          })
+        : Option.none(),
+      attachedPid: existing.pid,
+      ...Option.match(input.bearerToken, {
+        onNone: () => ({}),
+        onSome: (attachedBearerToken) => ({ attachedBearerToken }),
+      }),
+    } satisfies DesktopBackendManager.DesktopBackendStartConfig;
+  });
+
 const resolveWslStartConfig = Effect.fn("desktop.backendConfiguration.resolveWsl")(function* (
   input: SharedBootstrapInput & {
     readonly port: number;
@@ -866,8 +940,60 @@ export const make = Effect.gen(function* () {
     return { useWsl, wslRequested, distro: persistedSettings.wslDistro };
   });
 
+  const requiresExistingLocalBackend = DesktopExistingLocalBackend.requiresExistingLocalBackend({
+    isDevelopment: environment.isDevelopment,
+    platform: environment.platform,
+  });
+
+  const resolveExistingLocalBackend = Effect.gen(function* () {
+    if (!requiresExistingLocalBackend) {
+      return Option.none<DesktopExistingLocalBackend.ExistingLocalBackend>();
+    }
+    return yield* DesktopExistingLocalBackend.discoverExistingLocalBackend(
+      environment.path.join(environment.stateDir, "server-runtime.json"),
+    ).pipe(
+      Effect.provideService(FileSystem.FileSystem, fileSystem),
+      Effect.provide(FetchHttpClient.layer),
+    );
+  }).pipe(Effect.withSpan("desktop.backendConfiguration.resolveExistingLocalBackend"));
+
   return DesktopBackendConfiguration.of({
+    resolveExistingLocalBackend,
     resolvePrimary: Effect.gen(function* () {
+      if (requiresExistingLocalBackend) {
+        const existing = yield* resolveExistingLocalBackend;
+        if (Option.isSome(existing)) {
+          const shared = yield* sharedInputs;
+          const resourceMonitorPath = yield* resolveResourceMonitorPath().pipe(
+            Effect.provideService(FileSystem.FileSystem, fileSystem),
+            Effect.provideService(DesktopEnvironment.DesktopEnvironment, environment),
+          );
+          const bearerToken = yield* readAttachedSessionToken(
+            environment.path.join(environment.stateDir, DESKTOP_LOCAL_SESSION_FILE),
+            existing.value.origin,
+          ).pipe(
+            Effect.provideService(FileSystem.FileSystem, fileSystem),
+            Effect.provide(FetchHttpClient.layer),
+          );
+          return yield* resolveAttachedPrimaryStartConfig({
+            ...shared,
+            existing: existing.value,
+            bearerToken,
+            resourceMonitorPath,
+          }).pipe(Effect.provideService(DesktopEnvironment.DesktopEnvironment, environment));
+        }
+
+        const config = yield* buildWindowsPrimaryConfig;
+        return {
+          ...config,
+          preflightFailure: Option.some({
+            reason: requiredLocalBackendUnavailableReason,
+            fatal: true,
+            kind: "existing-local-backend" as const,
+          }),
+        } satisfies DesktopBackendManager.DesktopBackendStartConfig;
+      }
+
       const { useWsl, wslRequested } = yield* describePrimary;
       if (useWsl) {
         return yield* buildWslPrimaryConfig;

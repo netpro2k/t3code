@@ -179,6 +179,7 @@ if [[ -f "$runtime_state_path" ]]; then
   fi
 fi
 
+"$node_path" "$repo_root/scripts/provision-desktop-session.ts" "$server_entry" "$HOME/.t3"
 mv -f "$service_launcher_tmp" "$service_launcher"
 mv -f "$plist_tmp" "$plist_path"
 rm -f "$legacy_plist_path"

@@ -120,3 +120,17 @@ Downloads, it may need Full Disk Access for the Node executable listed in
 
 For failures after signing in to T3 Connect, see
 [connection troubleshooting](./remote-access.md#t3-connect-troubleshooting).
+
+## Using the Desktop App With the Service
+
+On macOS and Linux, the packaged desktop app requires this background server and always attaches to
+it. Desktop never starts another backend against the same data directory; process lifetime and
+network exposure stay with the launch agent or systemd user unit.
+
+Each run of this fork’s macOS or Linux update script renews Desktop’s local session for 30 days.
+Relaunch Desktop after updating to load the new session. The credential is stored in an owner-only
+file in the environment’s data directory and survives background service restarts.
+
+If the service is missing or unreachable, Desktop shows a startup error. Start or restart the
+service, then relaunch Desktop. If the saved session is missing, expired, or revoked, run the update
+script to renew it. Desktop never starts a second server to recover from an authentication failure.

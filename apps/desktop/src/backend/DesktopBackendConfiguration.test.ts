@@ -29,6 +29,7 @@ const PersistedServerObservabilitySettingsDocument = Schema.Struct({
 const encodePersistedServerObservabilitySettingsDocument = Schema.encodeEffect(
   Schema.fromJsonString(PersistedServerObservabilitySettingsDocument),
 );
+const encodeJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 
 const isDesktopBackendObservabilitySettingsReadError = Schema.is(
   DesktopBackendConfiguration.DesktopBackendObservabilitySettingsReadError,
@@ -218,6 +219,87 @@ const withPackagedWslHarness = <A, E, R>(
   }).pipe(Effect.scoped, Effect.provide(NodeServices.layer));
 
 describe("DesktopBackendConfiguration", () => {
+  it.effect("requires a provisioned session before attaching to the packaged backend", () =>
+    withHarness(
+      Effect.gen(function* () {
+        const server = yield* Effect.acquireRelease(
+          Effect.callback<NodeHttp.Server>((resume) => {
+            const server = NodeHttp.createServer((request, response) => {
+              response.setHeader("content-type", "application/json");
+              if (request.url === "/.well-known/t3/environment") {
+                response.end(
+                  encodeJson({
+                    environmentId: "attached-environment",
+                    label: "Local",
+                    platform: { os: "darwin", arch: "arm64" },
+                    serverVersion: "0.0.39",
+                    capabilities: { repositoryIdentity: true },
+                  }),
+                );
+              } else if (
+                request.url === "/api/auth/session" &&
+                request.headers.authorization === "Bearer saved-session"
+              ) {
+                response.end(
+                  encodeJson({
+                    authenticated: true,
+                    scopes: AuthAdministrativeScopes,
+                    auth: {
+                      policy: "remote-reachable",
+                      bootstrapMethods: ["one-time-token"],
+                      sessionMethods: ["bearer-access-token"],
+                      sessionCookieName: "t3_session",
+                    },
+                  }),
+                );
+              } else {
+                response.writeHead(401);
+                response.end();
+              }
+            });
+            server.listen(0, "127.0.0.1", () => resume(Effect.succeed(server)));
+          }),
+          (server) => Effect.sync(() => server.close()),
+        );
+        const address = server.address();
+        assert(address !== null && typeof address !== "string");
+        const origin = `http://127.0.0.1:${address.port}`;
+        const env = yield* DesktopEnvironment.DesktopEnvironment;
+        const fs = yield* FileSystem.FileSystem;
+        const configuration = yield* DesktopBackendConfiguration.DesktopBackendConfiguration;
+        yield* fs.makeDirectory(env.stateDir, { recursive: true });
+        yield* fs.writeFileString(
+          env.path.join(env.stateDir, "server-runtime.json"),
+          encodeJson({
+            version: 1,
+            pid: process.pid,
+            port: address.port,
+            origin,
+            startedAt: "2026-09-10T00:00:00Z",
+          }),
+        );
+        const missing = yield* configuration.resolvePrimary;
+        assert.equal(Option.getOrThrow(missing.preflightFailure).fatal, true);
+        assert.include(Option.getOrThrow(missing.preflightFailure).reason, "update script");
+        assert.isUndefined(missing.attachedBearerToken);
+
+        yield* fs.writeFileString(
+          env.path.join(env.stateDir, "desktop-session.json"),
+          encodeJson({
+            sessionId: "local-desktop",
+            token: "saved-session",
+            expiresAt: "2100-01-01T00:00:00Z",
+          }),
+        );
+        const attached = yield* configuration.resolvePrimary;
+        assert.isTrue(Option.isNone(attached.preflightFailure));
+        assert.equal(attached.attachedPid, process.pid);
+        assert.equal(attached.attachedBearerToken, "saved-session");
+        assert.equal(attached.httpBaseUrl.origin, origin);
+      }),
+    ),
+  );
+
   it.effect("resolvePrimary produces a stable scoped bootstrap token", () =>
     withHarness(
       Effect.gen(function* () {
@@ -245,6 +327,14 @@ describe("DesktopBackendConfiguration", () => {
         assert.equal(first.bootstrap.tailscaleServePort, 8443);
         assert.match(first.bootstrap.desktopBootstrapToken, /^[0-9a-f]{48}$/i);
         assert.equal(second.bootstrap.desktopBootstrapToken, first.bootstrap.desktopBootstrapToken);
+        assert.isUndefined(first.attachedPid);
+        const preflightFailure = Option.getOrThrow(first.preflightFailure);
+        assert.equal(preflightFailure.kind, "existing-local-backend");
+        assert.equal(preflightFailure.fatal, true);
+        assert.include(
+          preflightFailure.reason,
+          "requires the separately managed background server",
+        );
       }),
     ),
   );
@@ -824,6 +914,7 @@ describe("DesktopBackendConfiguration", () => {
         const configuration = yield* DesktopBackendConfiguration.DesktopBackendConfiguration;
         const config = yield* configuration.resolvePrimary;
         assert.equal(config.captureOutput, true);
+        assert.isTrue(Option.isNone(config.preflightFailure));
       }).pipe(
         Effect.provide(
           DesktopBackendConfiguration.layer.pipe(
@@ -1355,3 +1446,7 @@ describe("DesktopBackendConfiguration", () => {
     }
   });
 });
+// @effect-diagnostics nodeBuiltinImport:off
+import * as NodeHttp from "node:http";
+
+import { AuthAdministrativeScopes } from "@t3tools/contracts";

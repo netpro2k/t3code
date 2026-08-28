@@ -30,6 +30,36 @@ const config = {
 };
 
 describe("DesktopLocalEnvironmentAuth", () => {
+  it.effect("uses the provisioned bearer directly for an attached server", () =>
+    Effect.gen(function* () {
+      const poolLayer = Layer.succeed(DesktopBackendPool.DesktopBackendPool, {
+        list: Effect.succeed([
+          {
+            id: PRIMARY_LOCAL_ENVIRONMENT_ID,
+            currentConfig: Effect.succeed(
+              Option.some({
+                ...config,
+                attachedPid: 123,
+                attachedBearerToken: "provisioned-bearer",
+              }),
+            ),
+          },
+        ]),
+      } as unknown as DesktopBackendPool.DesktopBackendPool["Service"]);
+      const auth = yield* DesktopLocalEnvironmentAuth.make.pipe(
+        Effect.provide(poolLayer),
+        Effect.provideService(
+          HttpClient.HttpClient,
+          HttpClient.make(() =>
+            Effect.die("Attached Desktop must not exchange bootstrap credentials"),
+          ),
+        ),
+      );
+      assert.equal(yield* auth.getBearerToken, "provisioned-bearer");
+      assert.equal(yield* auth.getBearerToken, "provisioned-bearer");
+    }),
+  );
+
   it.effect("exchanges the desktop bootstrap credential only once", () =>
     Effect.gen(function* () {
       const requestCount = yield* Ref.make(0);

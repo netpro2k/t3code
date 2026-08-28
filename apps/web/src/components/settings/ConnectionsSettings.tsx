@@ -157,6 +157,7 @@ import {
 } from "~/state/desktopNetworkAccess";
 import { desktopSshHostsStateAtom, filterDiscoveredSshHosts } from "~/state/desktopSshHosts";
 import { desktopWslStateAtom, refreshDesktopWslState } from "~/state/desktopWslState";
+import { desktopExistingLocalBackendStateAtom } from "~/state/desktopExistingLocalBackend";
 import {
   type EnvironmentPresentation,
   useEnvironments,
@@ -2016,6 +2017,12 @@ export function ConnectionsSettings() {
   const desktopWsl = useEnvironmentQuery(
     canManageLocalBackend && desktopBridge ? desktopWslStateAtom : null,
   );
+  const desktopExistingLocalBackend = useEnvironmentQuery(
+    canManageLocalBackend && desktopBridge?.getExistingLocalBackendState
+      ? desktopExistingLocalBackendStateAtom
+      : null,
+  );
+  const desktopExistingLocalBackendState = desktopExistingLocalBackend.data;
   const desktopWslState = desktopWsl.data;
   const desktopWslError = desktopWslMutationError ?? desktopWsl.error;
   const isLoadingWslState = desktopWsl.isPending && desktopWsl.data === null;
@@ -3174,6 +3181,7 @@ export function ConnectionsSettings() {
       />
     </>
   );
+  const isAttachedToExistingLocalBackend = desktopExistingLocalBackendState?.attached === true;
   const renderNetworkAccessRow = () => (
     <SettingsRow
       title={searchableSetting("network-access").title}
@@ -3328,9 +3336,11 @@ export function ConnectionsSettings() {
             ) : null}
             {canManageLocalBackend && desktopBridge ? (
               <>
-                {renderNetworkAccessRow()}
-                {renderEndpointRows("endpoint-rail")}
-                {renderTailscaleRow()}
+                {isAttachedToExistingLocalBackend
+                  ? renderDisabledNetworkAccessRow()
+                  : renderNetworkAccessRow()}
+                {isAttachedToExistingLocalBackend ? null : renderEndpointRows("endpoint-rail")}
+                {isAttachedToExistingLocalBackend ? null : renderTailscaleRow()}
                 {renderWslRow()}
                 <CloudLinkRow canManageRelay={canManageRelay} />
               </>
