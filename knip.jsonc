@@ -32,6 +32,8 @@
         "mobile-behavior/run.ts",
         "mobile-native-client.ts",
         "setup-worktree.ts",
+        // The detached Mac/Linux cutover scripts invoke this by path.
+        "prepare-desktop-update.ts",
         "sign-macos.ts",
         "prepare-server-compile-cache.cjs",
         "smoke-desktop-app.ts",
