@@ -5,7 +5,11 @@ import * as Stream from "effect/Stream";
 import type * as ChildProcess from "effect/process/ChildProcess";
 import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 
-import { discoverGrokSkills, leadingGrokSkillMention } from "./skills.ts";
+import {
+  discoverGrokSkills,
+  leadingGrokSkillMention,
+  grokSlashCommandsFromSkills,
+} from "./skills.ts";
 
 const inspectPayload = (skills: ReadonlyArray<unknown>) => JSON.stringify({ skills });
 
@@ -37,7 +41,10 @@ describe("discoverGrokSkills", () => {
   it.effect("maps inspect entries onto provider skills, sorted by name", () =>
     Effect.gen(function* () {
       const skills = yield* discoverGrokSkills({ binaryPath: "grok" }, {});
-
+      expect(grokSlashCommandsFromSkills(skills)).toEqual([
+        { name: "deploy", description: "Deploy the app." },
+        { name: "writing-docs", description: "Write user docs." },
+      ]);
       expect(skills).toEqual([
         {
           name: "deploy",
@@ -84,6 +91,7 @@ describe("discoverGrokSkills", () => {
     Effect.gen(function* () {
       const skills = yield* discoverGrokSkills({ binaryPath: "grok" }, {});
 
+      expect(grokSlashCommandsFromSkills(skills)).toEqual([]);
       expect(skills).toEqual([
         {
           name: "internal-helper",
