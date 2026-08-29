@@ -5,6 +5,7 @@ import * as EffectAcpErrors from "effect-acp/errors";
 import {
   applyGrokAcpModelSelection,
   buildGrokAcpSpawnInput,
+  grokAcpSessionMeta,
   grokAcpSpawnArgs,
   isValidGrokReasoningEffortToken,
   resolveGrokAcpBaseModelId,
@@ -44,6 +45,16 @@ describe("grokAcpSpawnArgs", () => {
       "stdio",
     ]);
     expect(grokAcpSpawnArgs("auto")).toEqual(["--permission-mode", "auto", "agent", "stdio"]);
+  });
+});
+
+describe("grokAcpSessionMeta", () => {
+  it("maps only Auto and Full access onto Grok session setup metadata", () => {
+    expect(grokAcpSessionMeta("auto")).toEqual({ autoMode: true });
+    expect(grokAcpSessionMeta("full-access")).toEqual({ yoloMode: true });
+    expect(grokAcpSessionMeta("approval-required")).toBeUndefined();
+    expect(grokAcpSessionMeta("auto-accept-edits")).toBeUndefined();
+    expect(grokAcpSessionMeta()).toBeUndefined();
   });
 });
 

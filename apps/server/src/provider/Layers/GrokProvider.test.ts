@@ -403,7 +403,11 @@ it.layer(NodeServices.layer)("checkGrokProviderStatus", (it) => {
 
   // A stand-in for the Grok CLI: `--version` and `models` print canned text,
   // and `agent stdio` execs the mock ACP agent so `initialize` returns model metadata.
-  const writeFakeGrokCli = (input: { readonly modelsOutput: string; readonly acp: boolean }) =>
+  const writeFakeGrokCli = (input: {
+    readonly modelsOutput: string;
+    readonly acp: boolean;
+    readonly skills?: boolean;
+  }) =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const dir = yield* fs.makeTempDirectoryScoped({ prefix: "t3code-grok-probe-" });
@@ -421,6 +425,14 @@ it.layer(NodeServices.layer)("checkGrokProviderStatus", (it) => {
           `  process.stdout.write(${JSON.stringify(input.modelsOutput)});`,
           "  process.exit(0);",
           "}",
+          ...(input.skills
+            ? [
+                'if (process.argv[2] === "inspect") {',
+                `  process.stdout.write('{"skills":[{"name":"deploy","description":"Deploy app","source":{"type":"project","path":"/repo/.grok/skills/deploy/SKILL.md"},"userInvocable":true}]}');`,
+                "  process.exit(0);",
+                "}",
+              ]
+            : []),
           'if (process.argv[2] !== "agent") process.exit(1);',
           ...(input.acp ? [execScriptSource({ scriptPath: mockAgentPath })] : ["process.exit(3);"]),
           "",
@@ -428,13 +440,14 @@ it.layer(NodeServices.layer)("checkGrokProviderStatus", (it) => {
       });
     });
 
-  it.effect("reports ready with ACP-discovered models when logged in", () =>
+  it.effect("reports native commands and inspect skills alongside ACP-discovered models", () =>
     Effect.gen(function* () {
       const snapshot = yield* Effect.scoped(
         Effect.gen(function* () {
           const grokPath = yield* writeFakeGrokCli({
             modelsOutput: LOGGED_IN_MODELS_OUTPUT,
             acp: true,
+            skills: true,
           });
           return yield* checkGrokProviderStatus(
             decodeGrokSettings({ enabled: true, binaryPath: grokPath }),
@@ -444,6 +457,7 @@ it.layer(NodeServices.layer)("checkGrokProviderStatus", (it) => {
       );
 
       expect(snapshot.status).toBe("ready");
+      expect(snapshot.slashCommands.map((command) => command.name)).toEqual(["compact", "deploy"]);
       expect(snapshot.version).toBe("1.0.13");
       expect(snapshot.auth).toEqual({
         status: "authenticated",

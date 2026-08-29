@@ -4,7 +4,7 @@ import * as Sink from "effect/Sink";
 import * as Stream from "effect/Stream";
 import { ChildProcessSpawner } from "effect/unstable/process";
 
-import { discoverGrokSkills } from "./GrokSkills.ts";
+import { discoverGrokSkills, grokSlashCommandsFromSkills } from "./GrokSkills.ts";
 
 const inspectPayload = (skills: ReadonlyArray<unknown>) => JSON.stringify({ skills });
 
@@ -170,5 +170,25 @@ describe("discoverGrokSkills", () => {
       );
       expect(failed._tag).toBe("Failure");
     });
+  });
+});
+
+describe("grokSlashCommandsFromSkills", () => {
+  it("publishes only user-invocable skills in the slash catalog", () => {
+    expect(
+      grokSlashCommandsFromSkills([
+        {
+          name: "deploy",
+          description: "Deploy the app.",
+          path: "/repo/.grok/skills/deploy/SKILL.md",
+          enabled: true,
+        },
+        {
+          name: "internal-helper",
+          path: "/opt/grok/skills/internal-helper/SKILL.md",
+          enabled: false,
+        },
+      ]),
+    ).toEqual([{ name: "deploy", description: "Deploy the app." }]);
   });
 });

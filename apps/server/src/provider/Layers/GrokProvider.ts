@@ -42,7 +42,7 @@ import {
   resolveGrokAcpBaseModelId,
 } from "../acp/GrokAcpSupport.ts";
 import { sessionModelStateFromInitialize } from "../acp/AcpRuntimeModel.ts";
-import { discoverGrokSkills } from "../Drivers/GrokSkills.ts";
+import { discoverGrokSkills, grokSlashCommandsFromSkills } from "../Drivers/GrokSkills.ts";
 
 const GROK_PRESENTATION = {
   displayName: "Grok",
@@ -521,6 +521,7 @@ export const checkGrokProviderStatus = Effect.fn("checkGrokProviderStatus")(func
       enabled: grokSettings.enabled,
       checkedAt,
       models,
+      slashCommands: grokSlashCommandsFromSkills(skills),
       skills,
       probe: {
         installed: true,
@@ -538,7 +539,10 @@ export const checkGrokProviderStatus = Effect.fn("checkGrokProviderStatus")(func
     checkedAt,
     models,
     skills,
-    slashCommands: acpMetadata?.slashCommands ?? [COMPACT_SLASH_COMMAND],
+    slashCommands: [
+      ...(acpMetadata?.slashCommands ?? [COMPACT_SLASH_COMMAND]),
+      ...grokSlashCommandsFromSkills(skills),
+    ],
     probe: {
       installed: true,
       version,

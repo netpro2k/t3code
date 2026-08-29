@@ -28,7 +28,7 @@ import {
 } from "../ProviderDriver.ts";
 import { withInstanceIdentity } from "./instanceIdentity.ts";
 import { mergeProviderInstanceEnvironment } from "../ProviderInstanceEnvironment.ts";
-import { discoverGrokSkills } from "./GrokSkills.ts";
+import { discoverGrokSkills, grokSlashCommandsFromSkills } from "./GrokSkills.ts";
 import {
   makeCachedProviderMaintenanceResolution,
   makeManualOnlyProviderMaintenanceCapabilities,
@@ -205,7 +205,19 @@ export const GrokDriver: ProviderDriver<GrokSettings, GrokDriverEnv> = {
                     }),
                 ),
               ),
-            ]).pipe(Effect.map(([machineSnapshot, skills]) => ({ ...machineSnapshot, skills })));
+            ]).pipe(
+              Effect.map(([machineSnapshot, skills]) => ({
+                ...machineSnapshot,
+                skills,
+                slashCommands: [
+                  ...machineSnapshot.slashCommands.filter(
+                    (command) =>
+                      !machineSnapshot.skills.some((skill) => skill.name === command.name),
+                  ),
+                  ...grokSlashCommandsFromSkills(skills),
+                ],
+              })),
+            );
 
       return {
         instanceId,
