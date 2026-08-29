@@ -29,7 +29,7 @@ import {
 } from "@t3tools/provider-core/server/driver";
 import { withInstanceIdentity } from "@t3tools/provider-core/server/instanceIdentity";
 import { mergeProviderInstanceEnvironment } from "@t3tools/provider-core/server/instanceEnvironment";
-import { discoverGrokSkills } from "./skills.ts";
+import { discoverGrokSkills, grokSlashCommandsFromSkills } from "./skills.ts";
 import {
   homebrewOwnershipFromCommandPath,
   makeCachedProviderMaintenanceResolution,
@@ -250,7 +250,18 @@ export const GrokDriver: ProviderDriver<GrokSettings, GrokDriverEnv, Path.Path> 
                   }),
               ),
             ),
-          ]).pipe(Effect.map(([machineSnapshot, skills]) => ({ ...machineSnapshot, skills })));
+          ]).pipe(
+            Effect.map(([machineSnapshot, skills]) => ({
+              ...machineSnapshot,
+              skills,
+              slashCommands: [
+                ...machineSnapshot.slashCommands.filter(
+                  (command) => !machineSnapshot.skills.some((skill) => skill.name === command.name),
+                ),
+                ...grokSlashCommandsFromSkills(skills),
+              ],
+            })),
+          );
 
     return {
       instanceId,
