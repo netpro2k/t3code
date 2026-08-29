@@ -27,6 +27,17 @@ T3 Code runs the coding agents on your machine and gives them one fast interface
 
 It works with Claude Code, Codex, Cursor, OpenCode, Grok Build, Antigravity, Kiro, Pi, Muse Code, fx, and any [ACP](./docs/user/providers-acp.md) agent. If an agent is set up on your computer, T3 Code can control it.
 
+> [!IMPORTANT]
+> This fork is maintained as a linear stack of self-contained patch commits rebased onto
+> `upstream/main`. Every fork-owned commit starts with `[PATCH]` followed by a short, one-line
+> description and has a detailed body recording the implementation thread's intent, behavior,
+> design constraints, affected integrations, verification, and useful rebase notes. Keep each patch
+> to one feature, include its tests and docs, and avoid unrelated formatting, renames, or generated
+> churn so future conflicts stay small. Use the repository's `$maintain-patch-stack` agent skill when
+> creating patch commits or pulling upstream changes; it audits whether upstream supersedes or
+> conflicts with a patch, rebases the stack, resolves safe conflicts, and preserves a backup before
+> rewriting history.
+
 ## What you get
 
 - **Your subscriptions.** T3 Code does not resell tokens. It drives the agents you are already signed in to.
