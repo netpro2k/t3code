@@ -1,5 +1,5 @@
 // The CLI catalog honors ignored/disabled skills and nested plugin skills that flat scans miss.
-import type { ServerProviderSkill } from "@t3tools/contracts";
+import type { ServerProviderSkill, ServerProviderSlashCommand } from "@t3tools/contracts";
 import type { GrokSettings } from "../settings.ts";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
@@ -82,6 +82,18 @@ function decodeGrokInspectSkills(stdout: string): ReadonlyArray<ServerProviderSk
   }
 
   return [...skillsByName.values()].sort((left, right) => left.name.localeCompare(right.name));
+}
+
+/** Grok accepts user-invocable skills through both `$name` and `/name`. */
+export function grokSlashCommandsFromSkills(
+  skills: ReadonlyArray<ServerProviderSkill>,
+): ReadonlyArray<ServerProviderSlashCommand> {
+  return skills
+    .filter((skill) => skill.enabled)
+    .map((skill) => ({
+      name: skill.name,
+      ...(skill.description ? { description: skill.description } : {}),
+    }));
 }
 
 export const discoverGrokSkills = Effect.fn("discoverGrokSkills")(function* (
