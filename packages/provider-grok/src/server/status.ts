@@ -45,7 +45,7 @@ import {
   resolveGrokAcpBaseModelId,
 } from "./acpSupport.ts";
 import { sessionModelStateFromInitialize } from "@t3tools/provider-acp/server/runtimeModel";
-import { discoverGrokSkills } from "./skills.ts";
+import { discoverGrokSkills, grokSlashCommandsFromSkills } from "./skills.ts";
 import { grokProbeEnvironment } from "./probeEnvironment.ts";
 
 const GROK_PRESENTATION = {
@@ -557,7 +557,10 @@ export const checkGrokProviderStatus = Effect.fn("checkGrokProviderStatus")(func
     checkedAt,
     models,
     skills,
-    slashCommands: acpMetadata?.slashCommands ?? [COMPACT_SLASH_COMMAND],
+    slashCommands: [
+      ...(acpMetadata?.slashCommands ?? [COMPACT_SLASH_COMMAND]),
+      ...grokSlashCommandsFromSkills(skills),
+    ],
     probe: {
       installed: true,
       version,

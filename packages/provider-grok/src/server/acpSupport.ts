@@ -57,6 +57,20 @@ export function grokAcpSpawnArgs(runtimeMode?: RuntimeMode): ReadonlyArray<strin
   }
 }
 
+/** Grok reads Auto and Full access from session setup metadata as well as argv. */
+function grokAcpSessionMeta(
+  runtimeMode?: RuntimeMode,
+): { readonly autoMode?: true; readonly yoloMode?: true } | undefined {
+  switch (runtimeMode) {
+    case "auto":
+      return { autoMode: true };
+    case "full-access":
+      return { yoloMode: true };
+    default:
+      return undefined;
+  }
+}
+
 function buildGrokAcpSpawnInput(
   grokSettings: GrokAcpRuntimeGrokSettings | null | undefined,
   cwd: string,
@@ -129,6 +143,7 @@ export const makeGrokAcpRuntime = Effect.fn("GrokAcpSupport.makeGrokAcpRuntime")
   ChildProcessSpawner.ChildProcessSpawner | Crypto.Crypto | Scope.Scope
 > {
   const processGroupPlatform = yield* HostProcess.Platform.pipe(Effect.provide(NodeServices.layer));
+  const sessionMeta = grokAcpSessionMeta(input.runtimeMode);
   const acpContext = yield* Layer.build(
     AcpSessionRuntime.layer({
       ...input,
@@ -138,6 +153,7 @@ export const makeGrokAcpRuntime = Effect.fn("GrokAcpSupport.makeGrokAcpRuntime")
         input.environment,
         input.runtimeMode,
       ),
+      ...(sessionMeta ? { sessionMeta } : {}),
       authMethodId: resolveGrokAuthMethodId(input.environment),
       cancelMeta: { ...input.cancelMeta, ...GROK_ACP_CANCEL_META },
       initializeMeta: GROK_ACP_INITIALIZE_META,
