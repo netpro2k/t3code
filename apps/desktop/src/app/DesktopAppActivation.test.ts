@@ -8,7 +8,8 @@ import {
   ProjectId,
   ThreadId,
   type DesktopAppActivationRequest,
-  type DesktopAppActivationResponse,
+  type DesktopAppControlRequest,
+  type DesktopAppControlResponse,
 } from "@t3tools/contracts";
 import { resolveDesktopAppControlAddress } from "@t3tools/shared/desktopAppControl";
 import { HostProcessPlatform, HostProcessUserId } from "@t3tools/shared/hostProcess";
@@ -44,8 +45,8 @@ function request(requestId: string, platform: NodeJS.Platform): DesktopAppActiva
   };
 }
 
-function exchange(address: string, payload: DesktopAppActivationRequest) {
-  return new Promise<DesktopAppActivationResponse>((resolve, reject) => {
+function exchange(address: string, payload: DesktopAppControlRequest) {
+  return new Promise<DesktopAppControlResponse>((resolve, reject) => {
     const socket = NodeNet.createConnection(address);
     socket.setEncoding("utf8");
     let buffer = "";
@@ -56,7 +57,7 @@ function exchange(address: string, payload: DesktopAppActivationRequest) {
       const newline = buffer.indexOf("\n");
       if (newline === -1) return;
       socket.destroy();
-      resolve(JSON.parse(buffer.slice(0, newline)) as DesktopAppActivationResponse);
+      resolve(JSON.parse(buffer.slice(0, newline)) as DesktopAppControlResponse);
     });
   });
 }
@@ -74,6 +75,7 @@ describe("desktop app control server", () => {
           ...target,
           userId,
           handle: async (input) => {
+            if (input.type !== "open-workspace") throw new Error("unexpected request type");
             received.push(input);
             return {
               version: 1,
