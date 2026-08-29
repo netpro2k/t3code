@@ -45,6 +45,48 @@ const setProcessEnv = (name: string, value: string) => {
 };
 
 describe("AcpSessionRuntime", () => {
+  it.effect.each([undefined, { autoMode: true }, { yoloMode: true }])(
+    "forwards optional provider session metadata on new and load: %j",
+    (sessionMeta) =>
+      Effect.gen(function* () {
+        const requests: Array<AcpSessionRuntime.AcpSessionRequestLogEvent> = [];
+        const makeRuntime = (resumeSessionId?: string) =>
+          AcpSessionRuntime.make({
+            ...mockRuntimeOptions,
+            ...(sessionMeta ? { sessionMeta: () => sessionMeta } : {}),
+            ...(resumeSessionId ? { resumeSessionId } : {}),
+            requestLogger: (event) =>
+              Effect.sync(() => {
+                requests.push(event);
+              }),
+          });
+        const created = yield* makeRuntime();
+        yield* created.start();
+        yield* created.loadSession("mock-session-2");
+        const loaded = yield* makeRuntime("mock-session-1");
+        yield* loaded.start();
+        const setup = requests.filter(
+          (event) =>
+            event.status === "started" &&
+            (event.method === "session/new" || event.method === "session/load"),
+        );
+        expect(setup.map((event) => event.method)).toEqual([
+          "session/new",
+          "session/load",
+          "session/load",
+        ]);
+        for (const event of setup) {
+          expect(event.payload).toEqual(
+            expect.objectContaining({
+              cwd: process.cwd(),
+              ...(sessionMeta ? { _meta: sessionMeta } : {}),
+            }),
+          );
+          if (!sessionMeta) expect(event.payload).not.toHaveProperty("_meta");
+        }
+      }).pipe(Effect.scoped, Effect.provide(Layer.merge(NodeServices.layer, NodeCrypto.layer))),
+  );
+
   it.effect.each(["session/new", "session/resume"] as const)(
     "buffers root metadata while %s startup is still pending",
     (setupMethod) =>
