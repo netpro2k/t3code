@@ -15,7 +15,11 @@
  *
  * @module provider/Drivers/GrokSkills
  */
-import type { GrokSettings, ServerProviderSkill } from "@t3tools/contracts";
+import type {
+  GrokSettings,
+  ServerProviderSkill,
+  ServerProviderSlashCommand,
+} from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import * as Result from "effect/Result";
@@ -73,6 +77,18 @@ export function parseGrokInspectSkills(stdout: string): ReadonlyArray<ServerProv
   }
 
   return [...skillsByName.values()].sort((left, right) => left.name.localeCompare(right.name));
+}
+
+/** Grok accepts user-invocable skills through both `$name` and `/name`. */
+export function grokSlashCommandsFromSkills(
+  skills: ReadonlyArray<ServerProviderSkill>,
+): ReadonlyArray<ServerProviderSlashCommand> {
+  return skills
+    .filter((skill) => skill.enabled)
+    .map((skill) => ({
+      name: skill.name,
+      ...(skill.description ? { description: skill.description } : {}),
+    }));
 }
 
 /**

@@ -34,7 +34,7 @@ import {
   makeGrokAcpRuntime,
   resolveGrokAcpBaseModelId,
 } from "../acp/GrokAcpSupport.ts";
-import { discoverGrokSkills } from "../Drivers/GrokSkills.ts";
+import { discoverGrokSkills, grokSlashCommandsFromSkills } from "../Drivers/GrokSkills.ts";
 
 const GROK_PRESENTATION = {
   displayName: "Grok",
@@ -355,6 +355,7 @@ export const checkGrokProviderStatus = Effect.fn("checkGrokProviderStatus")(func
   }
 
   const skills = yield* discoverGrokSkills(grokSettings, environment, cwd);
+  const slashCommands = grokSlashCommandsFromSkills(skills);
 
   const discoveryExit = yield* discoverGrokModelsViaAcp(grokSettings, environment).pipe(
     Effect.timeoutOption(GROK_ACP_MODEL_DISCOVERY_TIMEOUT_MS),
@@ -369,6 +370,7 @@ export const checkGrokProviderStatus = Effect.fn("checkGrokProviderStatus")(func
       enabled: grokSettings.enabled,
       checkedAt,
       models: fallbackModels,
+      slashCommands,
       skills,
       probe: {
         installed: true,
@@ -388,6 +390,7 @@ export const checkGrokProviderStatus = Effect.fn("checkGrokProviderStatus")(func
       enabled: grokSettings.enabled,
       checkedAt,
       models: fallbackModels,
+      slashCommands,
       skills,
       probe: {
         installed: true,
@@ -409,6 +412,7 @@ export const checkGrokProviderStatus = Effect.fn("checkGrokProviderStatus")(func
     enabled: grokSettings.enabled,
     checkedAt,
     models,
+    slashCommands,
     skills,
     probe: {
       installed: true,

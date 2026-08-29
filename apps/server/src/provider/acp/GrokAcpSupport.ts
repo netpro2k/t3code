@@ -45,6 +45,20 @@ export function grokAcpSpawnArgs(runtimeMode?: RuntimeMode): ReadonlyArray<strin
   }
 }
 
+/** Grok reads Auto and Full access from session setup metadata as well as argv. */
+export function grokAcpSessionMeta(
+  runtimeMode?: RuntimeMode,
+): { readonly autoMode?: true; readonly yoloMode?: true } | undefined {
+  switch (runtimeMode) {
+    case "auto":
+      return { autoMode: true };
+    case "full-access":
+      return { yoloMode: true };
+    default:
+      return undefined;
+  }
+}
+
 export function buildGrokAcpSpawnInput(
   grokSettings: GrokAcpRuntimeGrokSettings | null | undefined,
   cwd: string,
@@ -76,6 +90,7 @@ export const makeGrokAcpRuntime = (
   Crypto.Crypto | Scope.Scope
 > =>
   Effect.gen(function* () {
+    const sessionMeta = grokAcpSessionMeta(input.runtimeMode);
     const acpContext = yield* Layer.build(
       AcpSessionRuntime.layer({
         ...input,
@@ -85,6 +100,7 @@ export const makeGrokAcpRuntime = (
           input.environment,
           input.runtimeMode,
         ),
+        ...(sessionMeta ? { sessionMeta } : {}),
         authMethodId: resolveGrokAuthMethodId(input.environment),
       }).pipe(
         Layer.provide(

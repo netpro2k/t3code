@@ -78,6 +78,8 @@ export interface AcpSessionRuntimeOptions {
   };
   readonly authMethodId: string;
   readonly mcpServers?: ReadonlyArray<EffectAcpSchema.McpServer>;
+  /** Optional ACP extension metadata forwarded during session setup. */
+  readonly sessionMeta?: Readonly<Record<string, unknown>>;
   readonly requestLogger?: (event: AcpSessionRequestLogEvent) => Effect.Effect<void, never>;
   readonly protocolLogging?: {
     readonly logIncoming?: boolean;
@@ -570,6 +572,7 @@ export const make = (
           sessionId: options.resumeSessionId,
           cwd: options.cwd,
           mcpServers: options.mcpServers ?? [],
+          ...(options.sessionMeta ? { _meta: options.sessionMeta } : {}),
         } satisfies EffectAcpSchema.LoadSessionRequest;
         const sessionLoadTimeout = Duration.fromInputUnsafe(
           options.sessionLoadTimeout ?? defaultSessionLoadTimeout,
@@ -643,6 +646,7 @@ export const make = (
         const createPayload = {
           cwd: options.cwd,
           mcpServers: options.mcpServers ?? [],
+          ...(options.sessionMeta ? { _meta: options.sessionMeta } : {}),
         } satisfies EffectAcpSchema.NewSessionRequest;
         const created = yield* runLoggedRequest(
           "session/new",
