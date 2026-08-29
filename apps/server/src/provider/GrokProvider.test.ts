@@ -228,6 +228,7 @@ it.layer(NodeServices.layer)("checkGrokProviderStatus", (it) => {
     readonly modelsOutput: string | ReadonlyArray<string>;
     readonly acp: boolean;
     readonly updateLogPath?: string;
+    readonly skills?: boolean;
   }) =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
@@ -258,6 +259,14 @@ it.layer(NodeServices.layer)("checkGrokProviderStatus", (it) => {
           "  process.stdout.write(outputs[Math.min(calls, outputs.length - 1)]);",
           "  process.exit(0);",
           "}",
+          ...(input.skills
+            ? [
+                'if (process.argv[2] === "inspect") {',
+                `process.stdout.write('{"skills":[{"name":"deploy","description":"Deploy app","source":{"type":"project","path":"/repo/.grok/skills/deploy/SKILL.md"},"userInvocable":true}]}');`,
+                "process.exit(0);",
+                "}",
+              ]
+            : []),
           'if (process.argv[2] !== "agent") process.exit(1);',
           ...(input.acp ? [execScriptSource({ scriptPath: mockAgentPath })] : ["process.exit(3);"]),
           "",
@@ -277,6 +286,7 @@ it.layer(NodeServices.layer)("checkGrokProviderStatus", (it) => {
             modelsOutput: LOGGED_IN_MODELS_OUTPUT,
             acp: true,
             updateLogPath,
+            skills: true,
           });
           const snapshot = yield* checkGrokProviderStatus(
             decodeGrokSettings({ enabled: true, binaryPath: grokPath }),
@@ -286,6 +296,7 @@ it.layer(NodeServices.layer)("checkGrokProviderStatus", (it) => {
         }),
       );
 
+      expect(snapshot.slashCommands.map((command) => command.name)).toEqual(["compact", "deploy"]);
       expect(updateRan).toBe(false);
       expect(environment.GROK_DISABLE_AUTOUPDATER).toBe("0");
       expect(snapshot.status).toBe("ready");
