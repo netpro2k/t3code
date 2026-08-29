@@ -16,6 +16,20 @@ export const DesktopAppActivationRequest = Schema.Struct({
 });
 export type DesktopAppActivationRequest = typeof DesktopAppActivationRequest.Type;
 
+export const DesktopAppPrepareUpdateRequest = Schema.Struct({
+  version: Schema.Literal(DESKTOP_APP_ACTIVATION_PROTOCOL_VERSION),
+  requestId: TrimmedNonEmptyString,
+  type: Schema.Literal("prepare-update"),
+  platform: DesktopAppActivationPlatform,
+});
+export type DesktopAppPrepareUpdateRequest = typeof DesktopAppPrepareUpdateRequest.Type;
+
+export const DesktopAppControlRequest = Schema.Union([
+  DesktopAppActivationRequest,
+  DesktopAppPrepareUpdateRequest,
+]);
+export type DesktopAppControlRequest = typeof DesktopAppControlRequest.Type;
+
 export const DesktopAppActivationErrorCode = Schema.Literals([
   "invalid-request",
   "renderer-unavailable",
@@ -37,6 +51,14 @@ export const DesktopAppActivationSuccess = Schema.Struct({
 });
 export type DesktopAppActivationSuccess = typeof DesktopAppActivationSuccess.Type;
 
+export const DesktopAppPrepareUpdateSuccess = Schema.Struct({
+  version: Schema.Literal(DESKTOP_APP_ACTIVATION_PROTOCOL_VERSION),
+  requestId: TrimmedNonEmptyString,
+  ok: Schema.Literal(true),
+  preparedForUpdate: Schema.Literal(true),
+});
+export type DesktopAppPrepareUpdateSuccess = typeof DesktopAppPrepareUpdateSuccess.Type;
+
 export const DesktopAppActivationFailure = Schema.Struct({
   version: Schema.Literal(DESKTOP_APP_ACTIVATION_PROTOCOL_VERSION),
   requestId: TrimmedNonEmptyString,
@@ -51,3 +73,10 @@ export const DesktopAppActivationResponse = Schema.Union([
   DesktopAppActivationFailure,
 ]);
 export type DesktopAppActivationResponse = typeof DesktopAppActivationResponse.Type;
+
+export const DesktopAppControlResponse = Schema.Union([
+  DesktopAppActivationSuccess,
+  DesktopAppPrepareUpdateSuccess,
+  DesktopAppActivationFailure,
+]);
+export type DesktopAppControlResponse = typeof DesktopAppControlResponse.Type;

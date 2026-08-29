@@ -1,4 +1,4 @@
-// @effect-diagnostics nodeBuiltinImport:off -- Local socket ownership checks need lstat, an atomic rename, and a directory watch at the Node adapter boundary.
+// @effect-diagnostics nodeBuiltinImport:off globalTimers:off -- Local socket ownership checks need lstat, an atomic rename, and a directory watch at the Node adapter boundary.
 import { pipe } from "effect/Function";
 import * as NodeCrypto from "node:crypto";
 import * as NodeFS from "node:fs";
@@ -9,7 +9,8 @@ import * as NodePath from "node:path";
 
 import {
   DESKTOP_APP_ACTIVATION_PROTOCOL_VERSION,
-  DesktopAppActivationRequest,
+  DesktopAppControlRequest,
+  type DesktopAppControlResponse,
   type DesktopAppActivationResponse,
 } from "@t3tools/contracts";
 import { resolveDesktopAppControlAddress } from "@t3tools/shared/desktopAppControl";
@@ -24,6 +25,7 @@ import * as Scope from "effect/Scope";
 
 import type * as Electron from "electron";
 
+import * as ElectronApp from "../electron/ElectronApp.ts";
 import * as ElectronWindow from "../electron/ElectronWindow.ts";
 import { DESKTOP_APP_ACTIVATION_REQUEST_CHANNEL } from "../ipc/channels.ts";
 import * as DesktopWindow from "../window/DesktopWindow.ts";
@@ -33,7 +35,7 @@ import { makeComponentLogger } from "./DesktopObservability.ts";
 
 const MAX_REQUEST_BYTES = 64 * 1024;
 const REQUEST_TIMEOUT_MS = 15_000;
-const isDesktopAppActivationRequest = Schema.is(DesktopAppActivationRequest);
+const isDesktopAppControlRequest = Schema.is(DesktopAppControlRequest);
 
 export class DesktopAppActivationStartError extends Schema.TaggedError<DesktopAppActivationStartError>()(
   "DesktopAppActivationStartError",
@@ -109,7 +111,7 @@ export async function startDesktopAppControlServer(input: {
   readonly address: string;
   readonly directory: string | null;
   readonly userId: number | undefined;
-  readonly handle: (request: DesktopAppActivationRequest) => Promise<DesktopAppActivationResponse>;
+  readonly handle: (request: DesktopAppControlRequest) => Promise<DesktopAppControlResponse>;
   readonly cancel: (requestId: string) => void;
   readonly onReclaimError: (error: unknown) => void;
 }): Promise<RunningControlServer> {
@@ -124,7 +126,7 @@ export async function startDesktopAppControlServer(input: {
 
     socket.setTimeout(5_000, () => socket.destroy());
 
-    const finish = (response: DesktopAppActivationResponse) => {
+    const finish = (response: DesktopAppControlResponse) => {
       responseSent = true;
       if (!socket.destroyed) socket.end(`${JSON.stringify(response)}\n`);
     };
@@ -151,7 +153,7 @@ export async function startDesktopAppControlServer(input: {
         return;
       }
 
-      if (!isDesktopAppActivationRequest(parsed)) {
+      if (!isDesktopAppControlRequest(parsed)) {
         pipe(
           requestIdFromUnknown(parsed),
           (requestId) => invalidResponse(requestId, "The desktop app request is invalid."),
@@ -299,6 +301,7 @@ export const make = Effect.gen(function* () {
   const desktopEnvironment = yield* DesktopEnvironment.DesktopEnvironment;
   const desktopWindow = yield* DesktopWindow.DesktopWindow;
   const electronWindow = yield* ElectronWindow.ElectronWindow;
+  const electronApp = yield* ElectronApp.ElectronApp;
   const path = yield* Path.Path;
   const userId = yield* HostProcess.UserId;
   const runPromise = Effect.runPromiseWith(yield* Effect.context<never>());
@@ -337,7 +340,28 @@ export const make = Effect.gen(function* () {
           startDesktopAppControlServer({
             ...address,
             userId,
-            handle: (request) => broker.request(request),
+            handle: async (request) => {
+              if (request.type === "open-workspace") return broker.request(request);
+
+              // Return the acknowledgement before asking Electron to quit. The
+              // normal before-quit lifecycle then flushes window state and
+              // shuts down Desktop-owned resources cleanly.
+              setTimeout(() => {
+                void runPromise(
+                  electronApp.quit.pipe(
+                    Effect.catchCause((cause) =>
+                      logWarning("failed to quit the desktop app for an update", { cause }),
+                    ),
+                  ),
+                );
+              }, 0);
+              return {
+                version: DESKTOP_APP_ACTIVATION_PROTOCOL_VERSION,
+                requestId: request.requestId,
+                ok: true,
+                preparedForUpdate: true,
+              };
+            },
             cancel: (requestId) => broker.cancel(requestId),
             onReclaimError: (cause) =>
               void runPromise(
