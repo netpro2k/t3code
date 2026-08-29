@@ -1,0 +1,4 @@
+interface:
+  display_name: "Maintain Patch Stack"
+  short_description: "Author and rebase fork patch commits safely"
+  default_prompt: "Use $maintain-patch-stack to update this fork from upstream while preserving and auditing every patch."
