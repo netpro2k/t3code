@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 
 # Updates this fork's Linux install end to end: pulls main unless --skip-pull
-# is passed, rebuilds web + server into the t3code systemd unit, and packages
-# the desktop client as an AppImage installed at ~/Applications/T3-Code.AppImage.
+# is passed, rebuilds web + server into the t3code systemd unit, packages the
+# desktop client, and installs this fork's user-wide agent skills.
 
 set -euo pipefail
 
@@ -245,6 +245,9 @@ if [[ ! -f "$server_entry" ]]; then
   exit 1
 fi
 install_user_t3_shim "$server_entry"
+bash "$repo_dir/scripts/install-user-agent-skill.sh" \
+  "$repo_dir/apps/server/resources/skills/manage-t3-threads" \
+  "$HOME"
 launcher_log="$HOME/.t3/userdata/logs/boot-service.log"
 # HTTPS port already published on this tailnet. The server tears the old
 # mapping down on stop and points it at the new listen port on start, so

@@ -32,6 +32,7 @@ import {
   SERVICE_LAUNCHER_CONTEXT_ENV,
   SERVICE_LAUNCHER_PROTOCOL,
 } from "./cloud/serviceProtocol.ts";
+import { ThreadCliError } from "./cli/thread.ts";
 import * as ServerConfig from "./config.ts";
 import * as ServerEnvironment from "./environment/ServerEnvironment.ts";
 import * as ProjectionSnapshotQuery from "./orchestration/Services/ProjectionSnapshotQuery.ts";
@@ -67,7 +68,9 @@ const DisconnectedLauncherChildLayer = Layer.mergeAll(
     off: () => undefined,
   }),
 );
-class ProjectCliHttpApi extends HttpApi.make("environment").add(EnvironmentOrchestrationHttpApi) {}
+class OrchestrationCliHttpApi extends HttpApi.make("environment").add(
+  EnvironmentOrchestrationHttpApi,
+) {}
 
 const connectCli = makeCli({ cloudEnabled: true });
 const noConnectCli = makeCli({ cloudEnabled: false });
@@ -138,10 +141,13 @@ const readPersistedSnapshot = (baseDir: string) =>
     }).pipe(Effect.provide(makeProjectPersistenceLayer(config)));
   });
 
-const withLiveProjectCliServer = <A, E, R>(baseDir: string, run: () => Effect.Effect<A, E, R>) =>
+const withLiveOrchestrationCliServer = <A, E, R>(
+  baseDir: string,
+  run: () => Effect.Effect<A, E, R>,
+) =>
   Effect.gen(function* () {
     const config = yield* makeCliTestServerConfig(baseDir);
-    const routesLayer = HttpApiBuilder.layer(ProjectCliHttpApi).pipe(
+    const routesLayer = HttpApiBuilder.layer(OrchestrationCliHttpApi).pipe(
       Layer.provide(orchestrationHttpApiLayer),
       Layer.provide(environmentAuthenticatedAuthLayer),
     );
@@ -238,6 +244,53 @@ it.layer(NodeServices.layer)("bin cli parsing", (it) => {
       assert.include(output, "uninstall");
       assert.include(output, "update");
       assert.include(output, "status");
+    }),
+  );
+
+  it.effect("exposes thread scripting commands and prompt options", () =>
+    Effect.gen(function* () {
+      const threadHelp = yield* captureStdout(runCli(["thread", "--help"]));
+      const runHelp = yield* captureStdout(runCli(["thread", "run", "--help"]));
+      const listHelp = yield* captureStdout(runCli(["thread", "list", "--help"]));
+
+      assert.include(threadHelp.output, "Create and manage threads on a running T3 server.");
+      assert.include(threadHelp.output, "list");
+      assert.include(threadHelp.output, "status");
+      assert.include(threadHelp.output, "settle");
+      assert.include(threadHelp.output, "unsettle");
+      assert.include(runHelp.output, "--prompt-file");
+      assert.include(runHelp.output, "--title");
+      assert.include(runHelp.output, "--project");
+      assert.include(runHelp.output, "Defaults to the current directory.");
+      assert.include(listHelp.output, "Restrict results to a project");
+    }),
+  );
+
+  it.effect("requires exactly one inline or file prompt before connecting", () =>
+    Effect.gen(function* () {
+      const baseDir = NodeFS.mkdtempSync(
+        NodePath.join(NodeOS.tmpdir(), "t3-cli-thread-prompt-test-"),
+      );
+      const promptFile = NodePath.join(baseDir, "prompt.md");
+      NodeFS.writeFileSync(promptFile, "Prompt from a file");
+
+      const missing = yield* runCliWithRuntime(["thread", "run", "--base-dir", baseDir]).pipe(
+        Effect.flip,
+      );
+      const duplicate = yield* runCliWithRuntime([
+        "thread",
+        "run",
+        "Inline prompt",
+        "--prompt-file",
+        promptFile,
+        "--base-dir",
+        baseDir,
+      ]).pipe(Effect.flip);
+
+      assert.instanceOf(missing, ThreadCliError);
+      assert.instanceOf(duplicate, ThreadCliError);
+      assert.equal(missing.message, "Provide exactly one of a prompt argument or --prompt-file.");
+      assert.equal(duplicate.message, "Provide exactly one of a prompt argument or --prompt-file.");
     }),
   );
 
@@ -575,7 +628,7 @@ it.layer(NodeServices.layer)("bin cli parsing", (it) => {
         NodePath.join(NodeOS.tmpdir(), "t3-cli-projects-live-workspace-"),
       );
 
-      yield* withLiveProjectCliServer(baseDir, () =>
+      yield* withLiveOrchestrationCliServer(baseDir, () =>
         Effect.gen(function* () {
           yield* runCliWithRuntime([
             "project",
@@ -593,6 +646,217 @@ it.layer(NodeServices.layer)("bin cli parsing", (it) => {
           );
           assert.isTrue(addedProject !== undefined);
           assert.equal(addedProject?.title, "Live Project");
+        }),
+      );
+    }),
+  );
+
+  it.effect("creates and manages threads through a running server", () =>
+    Effect.gen(function* () {
+      const baseDir = NodeFS.mkdtempSync(
+        NodePath.join(NodeOS.tmpdir(), "t3-cli-threads-live-test-"),
+      );
+      const workspaceRoot = NodeFS.mkdtempSync(
+        NodePath.join(NodeOS.tmpdir(), "t3-cli-threads-live-workspace-"),
+      );
+      const promptFile = NodePath.join(baseDir, "prompt.md");
+      NodeFS.writeFileSync(promptFile, "\n  Inspect the release notes from a prompt file.  \n");
+
+      yield* withLiveOrchestrationCliServer(baseDir, () =>
+        Effect.gen(function* () {
+          yield* runCliWithRuntime([
+            "project",
+            "add",
+            workspaceRoot,
+            "--title",
+            "Thread CLI Project",
+            "--base-dir",
+            baseDir,
+          ]);
+
+          const inlineRunOutput = yield* captureStdout(
+            runCli([
+              "thread",
+              "run",
+              "Investigate the flaky integration test",
+              "--project",
+              workspaceRoot,
+              "--base-dir",
+              baseDir,
+              "--json",
+            ]),
+          );
+          // @effect-diagnostics-next-line preferSchemaOverJson:off - CLI JSON output is decoded as a presentation DTO.
+          const inlineRun = JSON.parse(inlineRunOutput.output) as {
+            readonly threadId: string;
+            readonly projectId: string;
+            readonly title: string;
+            readonly state: string;
+            readonly sequence: number;
+          };
+          assert.equal(inlineRun.title, "Investigate the flaky integration test");
+          assert.equal(inlineRun.state, "queued");
+          assert.isAbove(inlineRun.sequence, 0);
+
+          const fileRunOutput = yield* captureStdout(
+            runCli([
+              "thread",
+              "run",
+              "--prompt-file",
+              promptFile,
+              "--title",
+              "Release notes audit",
+              "--project",
+              workspaceRoot,
+              "--runtime-mode",
+              "approval-required",
+              "--base-dir",
+              baseDir,
+              "--json",
+            ]),
+          );
+          // @effect-diagnostics-next-line preferSchemaOverJson:off - CLI JSON output is decoded as a presentation DTO.
+          const fileRun = JSON.parse(fileRunOutput.output) as {
+            readonly threadId: string;
+            readonly projectId: string;
+            readonly title: string;
+            readonly state: string;
+            readonly sequence: number;
+          };
+          assert.equal(fileRun.title, "Release notes audit");
+          assert.equal(fileRun.projectId, inlineRun.projectId);
+
+          const projectionSnapshotQuery = yield* ProjectionSnapshotQuery.ProjectionSnapshotQuery;
+          const readModel = yield* projectionSnapshotQuery.getSnapshot();
+          const inlineThread = readModel.threads.find((thread) => thread.id === inlineRun.threadId);
+          const fileThread = readModel.threads.find((thread) => thread.id === fileRun.threadId);
+          assert.equal(
+            inlineThread?.messages.at(-1)?.text,
+            "Investigate the flaky integration test",
+          );
+          assert.equal(
+            fileThread?.messages.at(-1)?.text,
+            "Inspect the release notes from a prompt file.",
+          );
+          assert.equal(fileThread?.title, "Release notes audit");
+          assert.equal(fileThread?.runtimeMode, "approval-required");
+
+          const listOutput = yield* captureStdout(
+            runCli([
+              "thread",
+              "list",
+              "--project",
+              inlineRun.projectId,
+              "--base-dir",
+              baseDir,
+              "--json",
+            ]),
+          );
+          // @effect-diagnostics-next-line preferSchemaOverJson:off - CLI JSON output is decoded as a presentation DTO.
+          const listed = JSON.parse(listOutput.output) as ReadonlyArray<{
+            readonly id: string;
+            readonly state: string;
+          }>;
+          assert.deepEqual(
+            new Set(listed.map((thread) => thread.id)),
+            new Set([inlineRun.threadId, fileRun.threadId]),
+          );
+          assert.deepEqual(new Set(listed.map((thread) => thread.state)), new Set(["queued"]));
+
+          const statusOutput = yield* captureStdout(
+            runCli(["thread", "status", fileRun.threadId, "--base-dir", baseDir, "--json"]),
+          );
+          // @effect-diagnostics-next-line preferSchemaOverJson:off - CLI JSON output is decoded as a presentation DTO.
+          const status = JSON.parse(statusOutput.output) as {
+            readonly id: string;
+            readonly state: string;
+            readonly modelSelection: { readonly instanceId: string; readonly model: string };
+            readonly runtimeMode: string;
+            readonly latestTurn: { readonly state: string } | null;
+            readonly pending: {
+              readonly approval: boolean;
+              readonly userInput: boolean;
+              readonly proposedPlan: boolean;
+            };
+          };
+          assert.equal(status.id, fileRun.threadId);
+          assert.equal(status.state, "queued");
+          assert.equal(status.runtimeMode, "approval-required");
+          assert.equal(status.latestTurn, null);
+          assert.equal(status.modelSelection.instanceId, "codex");
+          assert.deepEqual(status.pending, {
+            approval: false,
+            userInput: false,
+            proposedPlan: false,
+          });
+
+          const engine = yield* OrchestrationEngine.OrchestrationEngineService;
+          const idleThreadId = ThreadId.make("thread-cli-idle");
+          yield* engine.dispatch({
+            type: "thread.create",
+            commandId: CommandId.make("cmd-thread-cli-idle"),
+            threadId: idleThreadId,
+            projectId: inlineThread!.projectId,
+            title: "Idle thread",
+            modelSelection: {
+              instanceId: ProviderInstanceId.make("codex"),
+              model: "gpt-5.6-sol",
+            },
+            interactionMode: "default",
+            runtimeMode: "approval-required",
+            branch: null,
+            worktreePath: null,
+            createdAt: DateTime.formatIso(yield* DateTime.now),
+          });
+          const sessionUpdatedAt = DateTime.formatIso(yield* DateTime.now);
+          yield* engine.dispatch({
+            type: "thread.session.set",
+            commandId: CommandId.make("cmd-thread-cli-idle-session"),
+            threadId: idleThreadId,
+            session: {
+              threadId: idleThreadId,
+              status: "idle",
+              providerName: "Codex",
+              providerInstanceId: ProviderInstanceId.make("codex"),
+              runtimeMode: "approval-required",
+              activeTurnId: null,
+              lastError: null,
+              updatedAt: sessionUpdatedAt,
+            },
+            createdAt: sessionUpdatedAt,
+          });
+          const beforeSettle = yield* projectionSnapshotQuery.getShellSnapshot();
+
+          const settledOutput = yield* captureStdout(
+            runCli(["thread", "settle", idleThreadId, "--base-dir", baseDir, "--json"]),
+          );
+          assert.equal(
+            settledOutput.output,
+            // @effect-diagnostics-next-line preferSchemaOverJson:off - Exact CLI serialization is part of the output contract.
+            JSON.stringify({ threadId: idleThreadId, state: "settled" }),
+          );
+          const afterSettle = yield* projectionSnapshotQuery.getShellSnapshot();
+          assert.equal(afterSettle.snapshotSequence, beforeSettle.snapshotSequence + 2);
+          const settledListOutput = yield* captureStdout(
+            runCli(["thread", "list", "--state", "settled", "--base-dir", baseDir, "--json"]),
+          );
+          // @effect-diagnostics-next-line preferSchemaOverJson:off - CLI JSON output is decoded as a presentation DTO.
+          const settledList = JSON.parse(settledListOutput.output) as ReadonlyArray<{
+            readonly id: string;
+          }>;
+          assert.deepEqual(
+            settledList.map((thread) => thread.id),
+            [idleThreadId],
+          );
+
+          const unsettledOutput = yield* captureStdout(
+            runCli(["thread", "unsettle", idleThreadId, "--base-dir", baseDir, "--json"]),
+          );
+          assert.equal(
+            unsettledOutput.output,
+            // @effect-diagnostics-next-line preferSchemaOverJson:off - Exact CLI serialization is part of the output contract.
+            JSON.stringify({ threadId: idleThreadId, state: "active" }),
+          );
         }),
       );
     }),

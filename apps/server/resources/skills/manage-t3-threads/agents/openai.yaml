@@ -1,0 +1,7 @@
+interface:
+  display_name: "Manage T3 Threads"
+  short_description: "Create and monitor explicit T3 thread work"
+  default_prompt: "Use $manage-t3-threads to perform the requested explicit T3 thread operation and report the result."
+
+policy:
+  allow_implicit_invocation: true

@@ -2,8 +2,8 @@
 
 # Updates this fork's macOS install: packages the desktop client as an arm64
 # DMG into /Applications, builds the headless server from this checkout, and
-# installs a LaunchAgent that serves it with Tailscale Serve — the same model
-# as scripts/update-linux.sh. Packaged Desktop then attaches to that service
+# installs a LaunchAgent that serves it with Tailscale Serve, and installs this
+# fork's user-wide agent skills. Packaged Desktop then attaches to that service
 # instead of starting a second backend.
 
 set -euo pipefail
@@ -278,6 +278,9 @@ if [[ ! -f "$server_entry" ]]; then
   exit 1
 fi
 install_user_t3_shim "$server_entry"
+bash "$repo_root/scripts/install-user-agent-skill.sh" \
+  "$repo_root/apps/server/resources/skills/manage-t3-threads" \
+  "$HOME"
 
 # HTTPS port already published on this tailnet. The server tears the old
 # mapping down on stop and points it at the new listen port on start.
