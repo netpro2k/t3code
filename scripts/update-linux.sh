@@ -223,6 +223,9 @@ if [[ ! -f "$server_entry" ]]; then
   exit 1
 fi
 install_user_t3_shim "$server_entry"
+bash "$repo_dir/scripts/install-user-agent-skill.sh" \
+  "$repo_dir/apps/server/resources/skills/manage-t3-threads" \
+  "$HOME"
 launcher_log="$HOME/.t3/userdata/logs/boot-service.log"
 # HTTPS port already published on this tailnet. The server tears the old
 # mapping down on stop and points it at the new listen port on start, so

@@ -9,6 +9,7 @@ import * as HttpApiBuilder from "effect/unstable/httpapi/HttpApiBuilder";
 
 import { projectThreadDetailSnapshot } from "./ActivityPayloadProjection.ts";
 import { cleanupFailedUploadedAttachments, normalizeDispatchCommand } from "./Normalizer.ts";
+import { ProviderRegistry } from "../provider/Services/ProviderRegistry.ts";
 import {
   annotateEnvironmentRequest,
   failEnvironmentInternal,
@@ -27,6 +28,7 @@ export const orchestrationHttpApiLayer = HttpApiBuilder.group(
     const projectionSnapshotQuery = yield* ProjectionSnapshotQuery;
     const orchestrationEngine = yield* OrchestrationEngineService;
     const projectCloneTracker = yield* ProjectCloneTracker.ProjectCloneTracker;
+    const providerRegistry = yield* ProviderRegistry;
 
     return handlers
       .handle(
@@ -60,6 +62,14 @@ export const orchestrationHttpApiLayer = HttpApiBuilder.group(
                 failEnvironmentInternal("orchestration_snapshot_failed", cause),
               ),
             );
+        }),
+      )
+      .handle(
+        "providers",
+        Effect.fn("environment.orchestration.providers")(function* (args) {
+          yield* annotateEnvironmentRequest(args.endpoint.name);
+          yield* requireEnvironmentScope(AuthOrchestrationReadScope);
+          return yield* providerRegistry.getProviders;
         }),
       )
       .handle(
