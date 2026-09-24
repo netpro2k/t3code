@@ -48,6 +48,7 @@ const EMPTY_AGENT_PANEL_MODEL = emptyAgentPanelModel();
 const NOOP_OPEN_AGENTS = () => {};
 const EMPTY_QUEUED_MESSAGES: ReadonlyArray<QueuedComposerMessage> = [];
 const NOOP_QUEUED_MESSAGE_ACTION = (_id: string) => {};
+const NOOP_QUEUED_MESSAGE_SCHEDULE = (_id: string, _delivery: QueuedMessageDelivery) => {};
 const NOOP_USE_ARTIFACT_TEMPLATE = () => {};
 const NOOP_OPEN_ATTACHMENT = (_attachment: ChatFileAttachment) => {};
 import { resolveChatListAnchoredEndSpace } from "@t3tools/shared/chatList";
@@ -134,7 +135,8 @@ import type {
   KnownComposerContextRecord,
 } from "@t3tools/contracts";
 import { Button } from "../ui/button";
-import type { QueuedComposerMessage } from "../../queuedMessageStore";
+import type { QueuedComposerMessage, QueuedMessageDelivery } from "../../queuedMessageStore";
+import { Menu, MenuPopup, MenuRadioGroup, MenuRadioItem, MenuTrigger } from "../ui/menu";
 import { useAssetUrlRefresh, useAssetUrls, useAssetUrlState } from "../../assets/assetUrls";
 import { MediaVideoPlayer } from "../media/MediaVideoPlayer";
 import { getVirtualizedScrollFadeClassName } from "../ui/scroll-area";
@@ -285,6 +287,7 @@ interface TimelineRowSharedState {
   onWorktreeSetupWorkLocally: (() => void) | null;
   onOpenWorktreeSetupTerminal: ((terminalId: string) => void) | null;
   onSteerQueuedMessage: (id: string) => void;
+  onScheduleQueuedMessage: (id: string, delivery: QueuedMessageDelivery) => void;
   steerQueuedMessageShortcutLabel: string | null;
   onRemoveQueuedMessage: (id: string) => void;
 }
@@ -442,6 +445,7 @@ interface MessagesTimelineProps {
   /** Messages sent during the running turn. They render as ghost bubbles after the live rows. */
   queuedMessages?: ReadonlyArray<QueuedComposerMessage>;
   onSteerQueuedMessage?: (id: string) => void;
+  onScheduleQueuedMessage?: (id: string, delivery: QueuedMessageDelivery) => void;
   steerQueuedMessageShortcutLabel?: string | null;
   onRemoveQueuedMessage?: (id: string) => void;
 }
@@ -498,6 +502,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   loadEarlier = null,
   queuedMessages = EMPTY_QUEUED_MESSAGES,
   onSteerQueuedMessage = NOOP_QUEUED_MESSAGE_ACTION,
+  onScheduleQueuedMessage = NOOP_QUEUED_MESSAGE_SCHEDULE,
   steerQueuedMessageShortcutLabel = null,
   onRemoveQueuedMessage = NOOP_QUEUED_MESSAGE_ACTION,
 }: MessagesTimelineProps) {
@@ -943,6 +948,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       onWorktreeSetupWorkLocally: onWorktreeSetupWorkLocally ?? null,
       onOpenWorktreeSetupTerminal: onOpenWorktreeSetupTerminal ?? null,
       onSteerQueuedMessage,
+      onScheduleQueuedMessage,
       steerQueuedMessageShortcutLabel,
       onRemoveQueuedMessage,
     }),
@@ -976,6 +982,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       onWorktreeSetupWorkLocally,
       onOpenWorktreeSetupTerminal,
       onSteerQueuedMessage,
+      onScheduleQueuedMessage,
       steerQueuedMessageShortcutLabel,
       onRemoveQueuedMessage,
     ],
@@ -1513,11 +1520,14 @@ function QueuedMessageTimelineRow({
     queuedMessage.previewAnnotations.length +
     queuedMessage.reviewComments.length;
   const text = queuedMessage.prompt.trim();
+  const deliveryLabel = queuedMessage.delivery === "after-turn" ? "After turn" : "After next tool";
   const statusLabel = queuedMessage.holdUntilUserAction
-    ? "Waits for Send now"
+    ? "Choose when to send"
     : row.isNext
-      ? "Sends after the next tool call or when the turn ends"
-      : "Sends after the messages above it";
+      ? queuedMessage.delivery === "after-turn"
+        ? "Sends after the current turn ends"
+        : "Sends after the next tool call or when the turn ends"
+      : `Waits for the messages above it, then sends ${deliveryLabel.toLowerCase()}`;
   return (
     <div className="flex flex-col items-end" data-queued-message-id={queuedMessage.id}>
       <div className="max-w-[80%] rounded-2xl border border-dashed border-border p-3 text-message-foreground/80">
@@ -1542,16 +1552,39 @@ function QueuedMessageTimelineRow({
           className="mt-2 flex items-center gap-4 text-secondary-label text-xs"
           data-scroll-anchor-ignore
         >
-          <Tooltip>
-            <TooltipTrigger
-              render={<span className="inline-flex h-6 items-center gap-1" />}
-              aria-label={`Queued. ${statusLabel}.`}
+          <Menu>
+            <MenuTrigger
+              render={
+                <Button
+                  type="button"
+                  size="xs"
+                  variant="ghost-muted"
+                  className="h-6 gap-1 px-1.5 text-xs font-normal"
+                  aria-label={`Queued. ${statusLabel}. Change timing.`}
+                />
+              }
             >
               <ClockIcon className="size-3.5" aria-hidden />
-              Queued
-            </TooltipTrigger>
-            <TooltipPopup side="bottom">{statusLabel}</TooltipPopup>
-          </Tooltip>
+              {deliveryLabel}
+              <ChevronDownIcon className="size-3 opacity-60" aria-hidden />
+            </MenuTrigger>
+            <MenuPopup align="start" side="bottom" className="w-44">
+              <MenuRadioGroup value={queuedMessage.delivery}>
+                <MenuRadioItem
+                  value="after-turn"
+                  onClick={() => ctx.onScheduleQueuedMessage(queuedMessage.id, "after-turn")}
+                >
+                  After current turn
+                </MenuRadioItem>
+                <MenuRadioItem
+                  value="after-tool"
+                  onClick={() => ctx.onScheduleQueuedMessage(queuedMessage.id, "after-tool")}
+                >
+                  After next tool
+                </MenuRadioItem>
+              </MenuRadioGroup>
+            </MenuPopup>
+          </Menu>
           <div className="ml-auto flex items-center gap-0.5">
             <Tooltip>
               <TooltipTrigger

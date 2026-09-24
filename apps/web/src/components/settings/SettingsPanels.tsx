@@ -2596,7 +2596,7 @@ export function GeneralSettingsPanel() {
 
         <SettingsRow
           {...searchableSetting("follow-up-behavior")}
-          description="Queue follow-ups while the agent runs or steer the current turn."
+          description="Choose when follow-ups sent while the agent is working should run."
           resetAction={
             settings.followUpBehavior !== DEFAULT_UNIFIED_SETTINGS.followUpBehavior ? (
               <SettingResetButton
@@ -2613,22 +2613,29 @@ export function GeneralSettingsPanel() {
             <Select
               value={settings.followUpBehavior}
               onValueChange={(value) => {
-                if (value === "queue" || value === "steer") {
+                if (value === "after-turn" || value === "queue" || value === "steer") {
                   updateSettings({ followUpBehavior: value });
                 }
               }}
             >
-              <SelectTrigger size="sm" className="w-full sm:w-40" aria-label="Follow-up behavior">
+              <SelectTrigger size="sm" className="w-full sm:w-44" aria-label="Follow-up behavior">
                 <SelectValue>
-                  {settings.followUpBehavior === "queue" ? "Queue" : "Steer"}
+                  {settings.followUpBehavior === "after-turn"
+                    ? "After turn"
+                    : settings.followUpBehavior === "queue"
+                      ? "After next tool"
+                      : "Steer immediately"}
                 </SelectValue>
               </SelectTrigger>
               <SelectPopup align="end" alignItemWithTrigger={false}>
+                <SelectItem hideIndicator value="after-turn">
+                  After turn
+                </SelectItem>
                 <SelectItem hideIndicator value="queue">
-                  Queue
+                  After next tool
                 </SelectItem>
                 <SelectItem hideIndicator value="steer">
-                  Steer
+                  Steer immediately
                 </SelectItem>
               </SelectPopup>
             </Select>

@@ -32,14 +32,14 @@ See [images and videos](#images-and-videos-in-messages) for previewing and savin
 ## Send while the agent is working
 
 On web and desktop, a message sent during a running turn waits at the end of the conversation as a
-dashed bubble. It goes out on its own when the agent finishes its next tool
-call, or when the turn ends. Use the arrow under the bubble to send it right
-away, or the X to move it back into the composer. Stop returns every queued
-message to the composer.
+dashed bubble. By default it starts after the current turn ends. Use its timing
+control to send it after the next tool call instead, the arrow to steer it into
+the current turn immediately, or the X to move it back into the composer. Stop
+returns every queued message to the composer.
 
-In **Settings → General → Follow-up behavior**, choose **Queue** to keep this
-behavior or **Steer** to send new messages immediately. This setting applies to
-the current client. Messages already queued keep their place.
+In **Settings → General → Follow-up behavior**, choose **After turn**, **After
+next tool**, or **Steer immediately** as the default. This setting applies to the
+current client. Messages already queued keep their place and timing.
 
 Use `Cmd+Shift+Enter` on macOS or `Ctrl+Shift+Enter` on Windows and Linux to send
 the oldest queued message now. Change `thread.steerQueuedMessage` in

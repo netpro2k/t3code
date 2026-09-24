@@ -16,6 +16,7 @@ function makeMessage(prompt: string): Omit<QueuedComposerMessage, "id"> {
     previewAnnotations: [],
     reviewComments: [],
     submissionIntent: "foreground",
+    delivery: "after-tool",
     queuedAfterToolActivityId: null,
     createdAt: "2026-09-11T00:00:00.000Z",
   };
@@ -86,6 +87,21 @@ describe("queuedMessageStore", () => {
     ).toBe(false);
   });
 
+  it("reschedules a held message from the current tool boundary", () => {
+    const { enqueue, holdAtFront, schedule } = useQueuedMessageStore.getState();
+    const entry = enqueue("thread-a", makeMessage("first"));
+    holdAtFront("thread-a", entry);
+
+    schedule("thread-a", entry.id, "after-tool", "tool-2");
+
+    const [scheduled] = useQueuedMessageStore.getState().queuesByThreadKey["thread-a"] ?? [];
+    expect(scheduled).toMatchObject({
+      delivery: "after-tool",
+      queuedAfterToolActivityId: "tool-2",
+      holdUntilUserAction: false,
+    });
+  });
+
   it("drain empties one thread's queue in order", () => {
     const { enqueue, drain } = useQueuedMessageStore.getState();
     enqueue("thread-a", makeMessage("first"));
@@ -119,7 +135,7 @@ describe("queued message dispatch timing", () => {
   });
 
   it("waits mid-turn until a tool call finishes after the message was queued", () => {
-    const message = { queuedAfterToolActivityId: "a2" };
+    const message = { delivery: "after-tool" as const, queuedAfterToolActivityId: "a2" };
     expect(isQueuedMessageDue({ message, phase: "running", latestToolActivityId: "a2" })).toBe(
       false,
     );
@@ -129,15 +145,27 @@ describe("queued message dispatch timing", () => {
   });
 
   it("never auto-sends a message held for user action", () => {
-    const message = { queuedAfterToolActivityId: null, holdUntilUserAction: true };
+    const message = {
+      delivery: "after-tool" as const,
+      queuedAfterToolActivityId: null,
+      holdUntilUserAction: true,
+    };
     expect(isQueuedMessageDue({ message, phase: "ready", latestToolActivityId: "a4" })).toBe(false);
   });
 
   it("is due as soon as the turn is over, but not while a send is connecting", () => {
-    const message = { queuedAfterToolActivityId: "a2" };
+    const message = { delivery: "after-tool" as const, queuedAfterToolActivityId: "a2" };
     expect(isQueuedMessageDue({ message, phase: "ready", latestToolActivityId: "a2" })).toBe(true);
     expect(isQueuedMessageDue({ message, phase: "connecting", latestToolActivityId: "a4" })).toBe(
       false,
     );
+  });
+
+  it("keeps after-turn messages queued through tool boundaries", () => {
+    const message = { delivery: "after-turn" as const, queuedAfterToolActivityId: "a2" };
+    expect(isQueuedMessageDue({ message, phase: "running", latestToolActivityId: "a4" })).toBe(
+      false,
+    );
+    expect(isQueuedMessageDue({ message, phase: "ready", latestToolActivityId: "a4" })).toBe(true);
   });
 });

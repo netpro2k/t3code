@@ -314,6 +314,7 @@ import {
   isQueuedMessageDue,
   latestCompletedToolActivityId,
   type QueuedComposerMessage,
+  type QueuedMessageDelivery,
   useQueuedMessages,
   useQueuedMessageStore,
 } from "../queuedMessageStore";
@@ -7142,6 +7143,7 @@ export default function ChatView(props: ChatViewProps) {
         previewAnnotations: [],
         reviewComments: [],
         submissionIntent: "foreground",
+        delivery: "after-turn",
         queuedAfterToolActivityId: latestCompletedToolActivityId(threadActivities),
         // Restoration is not a send. The user decides when the overflow goes.
         holdUntilUserAction: true,
@@ -7514,7 +7516,7 @@ export default function ChatView(props: ChatViewProps) {
       !directAnnotation &&
       phase === "running" &&
       activeThreadKey &&
-      settings.followUpBehavior === "queue"
+      settings.followUpBehavior !== "steer"
     ) {
       if (composerRef.current?.validateProviderInput(promptForSend) === false) {
         return;
@@ -7527,6 +7529,7 @@ export default function ChatView(props: ChatViewProps) {
         previewAnnotations: [...composerPreviewAnnotations],
         reviewComments: [...composerReviewComments],
         submissionIntent,
+        delivery: settings.followUpBehavior === "queue" ? "after-tool" : "after-turn",
         queuedAfterToolActivityId: latestCompletedToolActivityId(threadActivities),
         createdAt: new Date().toISOString(),
       });
@@ -8219,6 +8222,7 @@ export default function ChatView(props: ChatViewProps) {
   // stable and does not bust TimelineRowCtx on every ChatView render.
   const queuedMessageActionsRef = useRef({
     steer: (_id: string) => {},
+    schedule: (_id: string, _delivery: QueuedMessageDelivery) => {},
     remove: (_id: string) => {},
   });
   queuedMessageActionsRef.current = {
@@ -8226,6 +8230,12 @@ export default function ChatView(props: ChatViewProps) {
       const message = queuedMessages.find((entry) => entry.id === id);
       if (!message || sendInFlightRef.current || queueBlockedByPendingRequest) return;
       void onSend(undefined, message.submissionIntent, undefined, message);
+    },
+    schedule: (id, delivery) => {
+      if (!activeThreadKey) return;
+      useQueuedMessageStore
+        .getState()
+        .schedule(activeThreadKey, id, delivery, latestCompletedToolActivityId(threadActivities));
     },
     remove: (id) => {
       if (!activeThreadKey) return;
@@ -8235,6 +8245,9 @@ export default function ChatView(props: ChatViewProps) {
   };
   const onSteerQueuedMessage = useCallback((id: string) => {
     queuedMessageActionsRef.current.steer(id);
+  }, []);
+  const onScheduleQueuedMessage = useCallback((id: string, delivery: QueuedMessageDelivery) => {
+    queuedMessageActionsRef.current.schedule(id, delivery);
   }, []);
   const onRemoveQueuedMessage = useCallback((id: string) => {
     queuedMessageActionsRef.current.remove(id);
@@ -9515,6 +9528,7 @@ export default function ChatView(props: ChatViewProps) {
                 loadEarlier={paintOnlyDisplayedTimeline ? null : loadEarlierTurns}
                 queuedMessages={paintOnlyDisplayedTimeline ? EMPTY_QUEUED_MESSAGES : queuedMessages}
                 onSteerQueuedMessage={onSteerQueuedMessage}
+                onScheduleQueuedMessage={onScheduleQueuedMessage}
                 steerQueuedMessageShortcutLabel={shortcutLabelForCommand(
                   keybindings,
                   "thread.steerQueuedMessage",

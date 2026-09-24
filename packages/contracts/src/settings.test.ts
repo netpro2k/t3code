@@ -530,9 +530,9 @@ describe("ClientSettings context window meter", () => {
 });
 
 describe("ClientSettings follow-up behavior", () => {
-  it("defaults to queue and accepts either behavior", () => {
-    expect(decodeClientSettings({}).followUpBehavior).toBe("queue");
-    for (const followUpBehavior of ["queue", "steer"]) {
+  it("defaults to waiting for the turn and accepts every delivery behavior", () => {
+    expect(decodeClientSettings({}).followUpBehavior).toBe("after-turn");
+    for (const followUpBehavior of ["after-turn", "queue", "steer"]) {
       expect(decodeClientSettings({ followUpBehavior }).followUpBehavior).toBe(followUpBehavior);
       expect(decodeClientSettingsPatch({ followUpBehavior }).followUpBehavior).toBe(
         followUpBehavior,

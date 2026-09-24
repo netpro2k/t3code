@@ -7,6 +7,8 @@ import type { TerminalContextDraft } from "./lib/terminalContext";
 import { randomUUID } from "./lib/utils";
 import type { ReviewCommentContext } from "./reviewCommentContext";
 
+export type QueuedMessageDelivery = "after-tool" | "after-turn";
+
 /**
  * A composer submission held back while the thread's turn is running. It
  * carries the full draft snapshot so the send path can dispatch it later with
@@ -21,6 +23,8 @@ export interface QueuedComposerMessage {
   previewAnnotations: PreviewAnnotationPayload[];
   reviewComments: ReviewCommentContext[];
   submissionIntent: ComposerSubmissionIntent;
+  /** The boundary that releases this message while it is first in line. */
+  delivery: QueuedMessageDelivery;
   /**
    * The newest completed tool activity at queue time. A different id later
    * means a tool call finished after the user queued, which is the boundary
@@ -56,6 +60,13 @@ interface QueuedMessageStoreState {
   ) => QueuedComposerMessage | null;
   /** Removes one message without touching the others' anchors. Null when already gone. */
   remove: (threadKey: string, id: string) => QueuedComposerMessage | null;
+  /** Changes when one message leaves the queue and releases any failure hold. */
+  schedule: (
+    threadKey: string,
+    id: string,
+    delivery: QueuedMessageDelivery,
+    toolActivityId: string | null,
+  ) => void;
   /**
    * Puts a message back at the head, held for user action. Used when its
    * send failed: the queue keeps its order and nothing behind it overtakes.
@@ -125,6 +136,28 @@ export const useQueuedMessageStore = create<QueuedMessageStoreState>()((set, get
     });
     return entry;
   },
+  schedule: (threadKey, id, delivery, toolActivityId) => {
+    set((state) => {
+      const queue = state.queuesByThreadKey[threadKey];
+      if (!queue?.some((message) => message.id === id)) return state;
+      return {
+        queuesByThreadKey: {
+          ...state.queuesByThreadKey,
+          [threadKey]: queue.map((message) =>
+            message.id === id
+              ? {
+                  ...message,
+                  delivery,
+                  queuedAfterToolActivityId:
+                    delivery === "after-tool" ? toolActivityId : message.queuedAfterToolActivityId,
+                  holdUntilUserAction: false,
+                }
+              : message,
+          ),
+        },
+      };
+    });
+  },
   holdAtFront: (threadKey, message) => {
     set((state) => {
       const rest = (state.queuesByThreadKey[threadKey] ?? EMPTY_QUEUE).filter(
@@ -181,18 +214,23 @@ export function latestCompletedToolActivityId(
 }
 
 /**
- * A queued message is due mid-turn once a tool call finished after it was
- * queued, and as soon as the turn is over otherwise. "connecting" is the gap
- * between a send and the provider picking it up, so nothing is due there.
+ * A queued message scheduled after a tool is due once a later tool call
+ * finishes. A message scheduled after the turn waits until the session is no
+ * longer running. "connecting" is the gap between a send and the provider
+ * picking it up, so nothing is due there.
  */
 export function isQueuedMessageDue(input: {
-  message: Pick<QueuedComposerMessage, "queuedAfterToolActivityId" | "holdUntilUserAction">;
+  message: Pick<
+    QueuedComposerMessage,
+    "delivery" | "queuedAfterToolActivityId" | "holdUntilUserAction"
+  >;
   phase: "connecting" | "running" | "ready" | "disconnected";
   latestToolActivityId: string | null;
 }): boolean {
   if (input.message.holdUntilUserAction) return false;
   if (input.phase === "connecting") return false;
   if (input.phase !== "running") return true;
+  if (input.message.delivery === "after-turn") return false;
   return input.latestToolActivityId !== input.message.queuedAfterToolActivityId;
 }
 
