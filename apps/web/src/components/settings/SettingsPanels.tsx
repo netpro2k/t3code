@@ -31,7 +31,7 @@ import {
   managedUpdatesDenial,
   managedUpdatesMessage,
 } from "@t3tools/client-runtime/contract-labels";
-import { desktopUpdateChannelOf } from "@t3tools/shared/cliRelease";
+import { desktopUpdateChannelOf, isForkReleaseVersion } from "@t3tools/shared/cliRelease";
 import { createModelSelection, pickModelSelection } from "@t3tools/shared/model";
 import { resolvePastedPath } from "@t3tools/shared/path";
 import * as Equal from "effect/Equal";
@@ -352,7 +352,7 @@ function AboutVersionSection() {
           </Tooltip>
         }
       />
-      {hasDesktopBridge ? (
+      {hasDesktopBridge && !isForkReleaseVersion(APP_VERSION) ? (
         <SettingsRow
           {...setting("update-track")}
           description={
