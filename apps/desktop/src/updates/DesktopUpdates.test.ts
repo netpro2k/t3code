@@ -77,6 +77,33 @@ const stableUpdateInfo = (
 };
 
 describe("DesktopUpdates", () => {
+  it.effect("keeps fork builds on the fork feed despite a saved or requested nightly track", () => {
+    const harness = makeHarness({
+      appVersion: "0.1.5-netpro2k",
+      savedChannel: "nightly",
+      policy: {
+        ...DesktopUpdatePolicy.unmanagedUpdatePolicy,
+        message: "Example Corp manages updates.",
+        feedUrl: "https://updates.example.com/",
+      },
+    });
+    return Effect.scoped(
+      Effect.gen(function* () {
+        const updates = yield* DesktopUpdates.DesktopUpdates;
+        yield* updates.configure;
+        assert.equal((yield* updates.getState).channel, "latest");
+        assert.equal((yield* updates.setChannel("nightly")).channel, "latest");
+        harness.emit("update-available", { version: "0.1.6" });
+        yield* flushCallbacks;
+        assert.isNull((yield* updates.getState).availableVersion);
+        assert.deepEqual(harness.feedUrls(), []);
+        harness.emit("update-available", { version: "0.1.6-netpro2k" });
+        yield* flushCallbacks;
+        assert.equal((yield* updates.getState).availableVersion, "0.1.6-netpro2k");
+      }),
+    ).pipe(Effect.provide(harness.layer));
+  });
+
   it.effect("updates Linux .deb installs and leaves other non-AppImage installs off", () =>
     Effect.gen(function* () {
       const linuxState = (packageType: string | undefined) =>
