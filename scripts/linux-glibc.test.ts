@@ -3,7 +3,7 @@ import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as NodeFSP from "node:fs/promises";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
-import { describe, expect, it } from "vite-plus/test";
+import { describe, expect, it, vi } from "vite-plus/test";
 
 import afterPack from "./linux-after-pack.ts";
 import { parseGlibcNeeds, scanGlibcNeeds } from "./linux-glibc.ts";
@@ -115,6 +115,21 @@ describe.skipIf(HostProcess.Platform.defaultValue() !== "linux")("packaged ELF s
         await expect(
           afterPack({ appOutDir: app, electronPlatformName: "linux", targets: [deb] }),
         ).rejects.toThrow(/helper.*GLIBC_2\.40.*2\.39/s);
+        const bin = NodePath.join(root, "bin");
+        await NodeFSP.mkdir(bin);
+        await NodeFSP.writeFile(NodePath.join(bin, "getconf"), "#!/bin/sh\necho 'glibc 2.44'\n", {
+          mode: 0o755,
+        });
+        vi.stubEnv("APP_VERSION", "0.1.10-netpro2k");
+        vi.stubEnv("PATH", `${bin}:${HostProcess.Environment.defaultValue().PATH ?? ""}`);
+        try {
+          await afterPack({ appOutDir: app, electronPlatformName: "linux", targets: [deb] });
+          expect(deb.options.depends).toEqual(["libnss3", "libc6 (>= 2.40)"]);
+          await NodeFSP.writeFile(NodePath.join(native, "helper"), elfFixture(machine, "2.45"));
+          await expect(scanGlibcNeeds(app)).rejects.toThrow(/helper.*GLIBC_2\.45.*2\.44/s);
+        } finally {
+          vi.unstubAllEnvs();
+        }
         await NodeFSP.writeFile(NodePath.join(native, "helper"), Buffer.from("\x7fELFbroken"));
         await expect(scanGlibcNeeds(app)).rejects.toThrow(/helper/);
       } finally {
