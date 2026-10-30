@@ -7,23 +7,27 @@ import {
   type ServerSelfUpdateResult,
 } from "@t3tools/contracts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
-import * as Config from "effect/Config";
 import * as Context from "effect/Context";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
-import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
+import * as Schema from "effect/Schema";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
 import * as Queue from "effect/Queue";
 import * as Stream from "effect/Stream";
-import { HttpClient } from "effect/http";
+import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/http";
 
 import {
-  CLI_RELEASE_BASE_URL_ENV,
   cliReleaseChannelOf,
+  CliRelease,
+  CLI_RELEASE_REPOSITORY,
+  cliArchivePlatformKey,
+  cliReleaseHasArchive,
+  cliReleaseTagUrl,
   crossesReleaseTrack,
+  isForkReleaseVersion,
 } from "@t3tools/shared/cliRelease";
 
 import packageJson from "../../package.json" with { type: "json" };
@@ -31,11 +35,10 @@ import * as ServerConfig from "../config.ts";
 import * as DesktopAppUpdate from "../desktopUpdate/DesktopAppUpdate.ts";
 import { databaseMigrationHead } from "../persistence/databaseMigrationHead.ts";
 import * as ManagedPolicy from "../policy/ManagedPolicy.ts";
-import { managedUpdateMirror, managedUpdateRefusal } from "../policy/managedUpdates.ts";
+import { managedUpdateRefusal } from "../policy/managedUpdates.ts";
 import * as ProcessRunner from "../processRunner.ts";
 import {
   ensurePinnedRuntimeInstalled,
-  isUnpublishedRelease,
   pinnedRuntimeCommand,
   PinnedRuntimeInstallError,
   pinnedRuntimePaths,
@@ -133,10 +136,6 @@ export const make = Effect.fn("cloud.server_self_update.make")(function* () {
   const platform = yield* HostProcess.Platform;
   const arch = yield* HostProcess.Architecture;
   const httpClient = yield* HttpClient.HttpClient;
-  const mirror = managedUpdateMirror(policy.document);
-  const releaseBaseUrl =
-    mirror?.feedUrl ??
-    Option.getOrUndefined(yield* Config.String(CLI_RELEASE_BASE_URL_ENV).pipe(Config.option));
   const inFlight = yield* Ref.make(false);
 
   yield* pruneRuntimesOnStart({ baseDir: serverConfig.baseDir, managed: launcher.managed }).pipe(
@@ -200,6 +199,33 @@ export const make = Effect.fn("cloud.server_self_update.make")(function* () {
     }
 
     return yield* Effect.gen(function* () {
+      // The App Store client can request upstream versions. Check publication
+      // before consulting the runtime cache or starting any install side effect.
+      if (!isForkReleaseVersion(targetVersion)) {
+        return yield* failWith(
+          `Only published ${CLI_RELEASE_REPOSITORY} fork versions can be installed.`,
+        );
+      }
+      const platformKey = cliArchivePlatformKey(platform, arch);
+      if (platformKey === undefined) {
+        return yield* failWith(`No fork server archive is supported for ${platform}-${arch}.`);
+      }
+      const release = yield* httpClient
+        .execute(HttpClientRequest.get(cliReleaseTagUrl(targetVersion)))
+        .pipe(
+          Effect.flatMap(HttpClientResponse.filterStatusOk),
+          Effect.flatMap((response) => response.text),
+          Effect.flatMap(Schema.decodeUnknownEffect(Schema.fromJsonString(CliRelease))),
+          Effect.timeout("30 seconds"),
+          Effect.mapError((cause) =>
+            failWith(`Could not verify the fork release ${targetVersion}.`, cause),
+          ),
+        );
+      if (!cliReleaseHasArchive(release, targetVersion, platformKey)) {
+        return yield* failWith(
+          `Fork release ${targetVersion} is not published with a ${platformKey} server archive and checksums.`,
+        );
+      }
       yield* reportProgress("downloading");
       const paths = yield* ensurePinnedRuntimeInstalled({
         baseDir: serverConfig.baseDir,
@@ -210,8 +236,7 @@ export const make = Effect.fn("cloud.server_self_update.make")(function* () {
         httpClient,
         platform,
         arch,
-        releaseBaseUrl,
-        requirePublishedRelease: mirror !== undefined,
+        requirePublishedRelease: true,
         validate: (runtime) =>
           runner
             .run({
@@ -285,12 +310,7 @@ export const make = Effect.fn("cloud.server_self_update.make")(function* () {
         Effect.mapError((error) =>
           error._tag === "PinnedRuntimePreflightBlockedError"
             ? failWith(error.reason, error)
-            : mirror !== undefined && isUnpublishedRelease(error)
-              ? failWith(
-                  `${mirror.organization}'s update mirror has no t3@${targetVersion} for this machine.`,
-                  error,
-                )
-              : failWith(`Could not prepare t3@${targetVersion}.`, error),
+            : failWith(`Could not prepare t3@${targetVersion}.`, error),
         ),
       );
 

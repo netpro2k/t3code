@@ -272,31 +272,51 @@ const bundleLinuxLibatomic = Effect.fn("bundleLinuxLibatomic")(function* (input:
   yield* fs.copyFile(source, path.join(input.contentDir, "lib/libatomic.so.1"));
 
   // libatomic is GPL-3.0-or-later WITH GCC-exception-3.1, so its terms and source travel with it.
-  const owner = yield* spawner.string(
-    ChildProcess.make("dpkg-query", ["-S", yield* fs.realPath(source)]),
-  );
-  // Keep the arch qualifier so a second installed arch cannot add its own line.
-  const [, qualifiedPkg, pkg] = /^(([^:\s]+)(?::[^:\s]+)?): /.exec(owner) ?? [];
-  const versions = qualifiedPkg
-    ? yield* spawner.string(
-        ChildProcess.make("dpkg-query", [
-          "-W",
-          "-f=${Version} ${source:Package} ${source:Version}",
-          qualifiedPkg,
-        ]),
-      )
-    : "";
-  const [version, sourcePackage, sourceVersion] = versions.trim().split(" ");
-  if (!pkg || !version || !sourcePackage || !sourceVersion) {
-    return yield* new CliArchiveInputMissingError({
-      inputPath: `dpkg package for ${source}`,
-      hint: "The archive copies libatomic's license and source reference from its Ubuntu package.",
-    });
+  let header: string;
+  if (yield* fs.exists("/etc/arch-release")) {
+    const owner = (yield* spawner.string(
+      ChildProcess.make("pacman", ["-Qqo", yield* fs.realPath(source)]),
+    )).trim();
+    const metadata = yield* spawner.string(ChildProcess.make("pacman", ["-Q", owner]));
+    const [pkg, version] = metadata.trim().split(/\s+/);
+    if (!pkg || pkg !== owner || !version) {
+      return yield* new CliArchiveInputMissingError({
+        inputPath: `pacman package for ${source}`,
+        hint: "The archive needs libatomic's installed package version and GCC source reference.",
+      });
+    }
+    header = [
+      `libatomic.so.1 is copied from the Arch Linux package ${pkg} ${version}.`,
+      "Source package: https://gitlab.archlinux.org/archlinux/packaging/packages/gcc",
+      `Source package version: ${version}`,
+    ].join("\n");
+  } else {
+    const owner = yield* spawner.string(
+      ChildProcess.make("dpkg-query", ["-S", yield* fs.realPath(source)]),
+    );
+    // Keep the arch qualifier so a second installed arch cannot add its own line.
+    const [, qualifiedPkg, pkg] = /^(([^:\s]+)(?::[^:\s]+)?): /.exec(owner) ?? [];
+    const versions = qualifiedPkg
+      ? yield* spawner.string(
+          ChildProcess.make("dpkg-query", [
+            "-W",
+            "-f=${Version} ${source:Package} ${source:Version}",
+            qualifiedPkg,
+          ]),
+        )
+      : "";
+    const [version, sourcePackage, sourceVersion] = versions.trim().split(" ");
+    if (!pkg || !version || !sourcePackage || !sourceVersion) {
+      return yield* new CliArchiveInputMissingError({
+        inputPath: `dpkg package for ${source}`,
+        hint: "The archive copies libatomic's license and source reference from its Ubuntu package.",
+      });
+    }
+    header = [
+      `libatomic.so.1 is copied from the Ubuntu package ${pkg} ${version}.`,
+      `Source: https://launchpad.net/ubuntu/+source/${sourcePackage}/${sourceVersion}`,
+    ].join("\n");
   }
-  const header = [
-    `libatomic.so.1 is copied from the Ubuntu package ${pkg} ${version}.`,
-    `Source: https://launchpad.net/ubuntu/+source/${sourcePackage}/${sourceVersion}`,
-  ].join("\n");
   // Vendored because CI runner images strip /usr/share/doc.
   const license = yield* fs.readFileString(
     path.join(input.repoRoot, "scripts/licenses/libatomic.LICENSE"),
@@ -316,6 +336,7 @@ const bundleLinuxLibatomic = Effect.fn("bundleLinuxLibatomic")(function* (input:
 
 const MacSigningConfig = Config.all({
   identity: Config.String("T3CODE_CLI_MAC_SIGN_IDENTITY").pipe(Config.option),
+  keychain: Config.String("CSC_KEYCHAIN").pipe(Config.option),
   appleApiKey: Config.String("APPLE_API_KEY").pipe(Config.option),
   appleApiKeyId: Config.String("APPLE_API_KEY_ID").pipe(Config.option),
   appleApiIssuer: Config.String("APPLE_API_ISSUER").pipe(Config.option),
@@ -349,6 +370,7 @@ const signMacArchiveContents = Effect.fn("signMacArchiveContents")(function* (in
         "--force",
         "--sign",
         identity,
+        ...(Option.isSome(signing.keychain) ? ["--keychain", signing.keychain.value] : []),
         ...(identity === "-" ? [] : ["--options", "runtime", "--timestamp"]),
         ...(target === input.executablePath ? ["--entitlements", entitlements] : []),
         target,
