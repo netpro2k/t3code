@@ -1,6 +1,7 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { expect, it } from "@effect/vitest";
 import * as HostProcess from "@t3tools/shared/HostProcess";
+import * as ConfigProvider from "effect/ConfigProvider";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -8,6 +9,7 @@ import * as Fiber from "effect/Fiber";
 import * as Path from "effect/Path";
 import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
+import * as Layer from "effect/Layer";
 import { HttpClient, HttpClientResponse } from "effect/http";
 import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 
@@ -22,27 +24,63 @@ import * as ServerSelfUpdate from "./selfUpdate.ts";
 interface HarnessOptions {
   readonly mode?: "web" | "desktop";
   readonly managed?: boolean;
+  readonly platform?: "linux" | "darwin";
+  readonly arch?: "x64" | "arm64";
+  readonly cached?: boolean;
   readonly preflight?: "ready" | "blocked";
   readonly beforeDownload?: Effect.Effect<void>;
+  readonly publication?:
+    | "draft"
+    | "missing"
+    | "wrong-tag"
+    | "no-checksums"
+    | "wrong-platform"
+    | "malformed"
+    | "offline";
   readonly requestUpdate?: ServiceLauncherClient.ServiceLauncherClient["Service"]["requestUpdate"];
   readonly desktopAppUpdate?: DesktopAppUpdate.DesktopAppUpdate["Service"];
 }
 
 const archiveBytes = new TextEncoder().encode("not really a tarball");
-const releaseHttpClient = (order: string[], beforeDownload?: Effect.Effect<void>) =>
+const releaseHttpClient = (order: string[], options: HarnessOptions) =>
   HttpClient.make((request) =>
     Effect.gen(function* () {
+      const { publication } = options;
+      const archiveName = `t3-1.1.0-netpro2k-${options.platform ?? "linux"}-${options.arch ?? "x64"}.tar.gz`;
+      expect(request.url).toContain("netpro2k/t3code/");
+      if (request.url.includes("/releases/tags/")) {
+        order.push("publication");
+        if (publication === "offline")
+          return HttpClientResponse.fromWeb(request, new Response(null, { status: 503 }));
+        if (publication === "missing")
+          return HttpClientResponse.fromWeb(request, new Response(null, { status: 404 }));
+        if (publication === "malformed")
+          return HttpClientResponse.fromWeb(request, Response.json({}));
+        return HttpClientResponse.fromWeb(
+          request,
+          Response.json({
+            tag_name: publication === "wrong-tag" ? "v1.1.0" : "v1.1.0-netpro2k",
+            draft: publication === "draft",
+            assets: [
+              ...(publication === "no-checksums" ? [] : [{ name: "SHA256SUMS" }]),
+              {
+                name:
+                  publication === "wrong-platform"
+                    ? "t3-1.1.0-netpro2k-darwin-arm64.tar.gz"
+                    : archiveName,
+              },
+            ],
+          }),
+        );
+      }
       if (request.url.endsWith("/SHA256SUMS")) {
         const digest = yield* Effect.promise(() => crypto.subtle.digest("SHA-256", archiveBytes));
         const hex = Array.from(new Uint8Array(digest), (byte) =>
           byte.toString(16).padStart(2, "0"),
         ).join("");
-        return HttpClientResponse.fromWeb(
-          request,
-          new Response(`${hex}  t3-1.1.0-linux-x64.tar.gz\n`),
-        );
+        return HttpClientResponse.fromWeb(request, new Response(`${hex}  ${archiveName}\n`));
       }
-      if (beforeDownload) yield* beforeDownload;
+      if (options.beforeDownload) yield* options.beforeDownload;
       order.push("download");
       return HttpClientResponse.fromWeb(request, new Response(archiveBytes));
     }),
@@ -55,6 +93,12 @@ const makeHarness = Effect.fn("test.make_self_update_harness")(function* (
   const path = yield* Path.Path;
   const baseDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-self-update-test-" });
   const order: string[] = [];
+  if (options.cached) {
+    const versionDir = path.join(baseDir, "runtime", "versions", "1.1.0-netpro2k");
+    yield* fs.makeDirectory(versionDir, { recursive: true });
+    yield* fs.writeFileString(path.join(versionDir, "t3"), "cached executable");
+    yield* fs.writeFileString(path.join(versionDir, ".install-complete"), "1.1.0-netpro2k\n");
+  }
   const runner = ProcessRunner.ProcessRunner.of({
     run: (input) =>
       Effect.gen(function* () {
@@ -77,10 +121,10 @@ const makeHarness = Effect.fn("test.make_self_update_harness")(function* (
         order.push("preflight");
         const result =
           options.preflight === "blocked"
-            ? { status: "blocked", version: "1.1.0", reason: "local update required" }
+            ? { status: "blocked", version: "1.1.0-netpro2k", reason: "local update required" }
             : {
                 status: "ready",
-                version: "1.1.0",
+                version: "1.1.0-netpro2k",
                 launcherProtocol: SERVICE_LAUNCHER_PROTOCOL,
               };
         return {
@@ -119,10 +163,21 @@ const makeHarness = Effect.fn("test.make_self_update_harness")(function* (
         run: () => Effect.die("unexpected desktop app update run"),
       },
     ),
-    Effect.provideService(HttpClient.HttpClient, releaseHttpClient(order, options.beforeDownload)),
-    Effect.provideService(HostProcess.Platform, "linux"),
-    Effect.provideService(HostProcess.Architecture, "x64"),
-    Effect.provide(ServerConfig.layer({ ...config, mode: options.mode ?? "web" })),
+    Effect.provideService(HttpClient.HttpClient, releaseHttpClient(order, options)),
+    Effect.provideService(HostProcess.Platform, options.platform ?? "linux"),
+    Effect.provideService(HostProcess.Architecture, options.arch ?? "x64"),
+    Effect.provide(
+      Layer.mergeAll(
+        ServerConfig.layer({ ...config, mode: options.mode ?? "web" }),
+        ConfigProvider.layer(
+          ConfigProvider.fromEnv({
+            env: {
+              T3CODE_RELEASE_BASE_URL: "https://github.com/pingdotgg/t3code/releases/download",
+            },
+          }),
+        ),
+      ),
+    ),
   );
   return { selfUpdate, order };
 });
@@ -137,7 +192,8 @@ it.layer(NodeServices.layer)("server self update", (it) => {
       ).toBe("'latest' is not an exact t3 version.");
       const desktop = yield* makeHarness({ mode: "desktop" });
       expect(
-        (yield* desktop.selfUpdate.update({ targetVersion: "1.1.0" }).pipe(Effect.flip)).reason,
+        (yield* desktop.selfUpdate.update({ targetVersion: "1.1.0-netpro2k" }).pipe(Effect.flip))
+          .reason,
       ).toContain("desktop app");
       expect([...web.order, ...desktop.order]).toEqual([]);
     }),
@@ -158,12 +214,71 @@ it.layer(NodeServices.layer)("server self update", (it) => {
           commit: () => Effect.never,
         },
       });
-      const result = yield* selfUpdate.update({ targetVersion: "1.1.0" }, (stage) =>
+      const result = yield* selfUpdate.update({ targetVersion: "1.1.0-netpro2k" }, (stage) =>
         Effect.sync(() => void stages.push(stage)),
       );
       expect(result).toEqual({ targetVersion: "1.2.0", method: "desktop-app" });
       expect(stages).toEqual(["downloading", "installing"]);
       expect(order).toEqual([]);
+    }),
+  );
+
+  it.effect("refuses an official mobile client's upstream version before any staging", () =>
+    Effect.gen(function* () {
+      const { selfUpdate, order } = yield* makeHarness();
+      const error = yield* selfUpdate.update({ targetVersion: "1.1.0" }).pipe(Effect.flip);
+      expect(error.reason).toContain("Only published netpro2k/t3code fork versions");
+      expect(order).toEqual([]);
+      // A rejected request must not retain the in-flight lock.
+      expect((yield* selfUpdate.update({ targetVersion: "1.1.0-netpro2k" })).method).toBe(
+        "boot-service",
+      );
+    }),
+  );
+
+  it.effect.each([
+    "draft",
+    "missing",
+    "wrong-tag",
+    "no-checksums",
+    "wrong-platform",
+    "malformed",
+    "offline",
+  ] as const)("refuses %s releases before downloading or handing off", (publication) =>
+    Effect.gen(function* () {
+      const { selfUpdate, order } = yield* makeHarness({ publication });
+      yield* selfUpdate.update({ targetVersion: "1.1.0-netpro2k" }).pipe(Effect.flip);
+      expect(order).toEqual(["publication"]);
+    }),
+  );
+
+  it.effect("refuses an unpublished fork version even when a runtime is cached", () =>
+    Effect.gen(function* () {
+      const { selfUpdate, order } = yield* makeHarness({ cached: true, publication: "missing" });
+      yield* selfUpdate.update({ targetVersion: "1.1.0-netpro2k" }).pipe(Effect.flip);
+      expect(order).toEqual(["publication"]);
+    }),
+  );
+
+  it.effect.each([
+    { platform: "darwin", arch: "arm64" },
+    { platform: "linux", arch: "arm64" },
+  ] as const)("installs the published $platform-$arch fork archive", ({ platform, arch }) =>
+    Effect.gen(function* () {
+      const { selfUpdate, order } = yield* makeHarness({ platform, arch });
+      expect((yield* selfUpdate.update({ targetVersion: "1.1.0-netpro2k" })).method).toBe(
+        "boot-service",
+      );
+      expect(order).toEqual(["publication", "download", "extract", "preflight", "accept"]);
+    }),
+  );
+
+  it.effect("preserves the preflight refusal reason", () =>
+    Effect.gen(function* () {
+      const { selfUpdate } = yield* makeHarness({ preflight: "blocked" });
+      expect(
+        (yield* selfUpdate.update({ targetVersion: "1.1.0-netpro2k" }).pipe(Effect.flip)).reason,
+      ).toBe("local update required");
     }),
   );
 
@@ -175,13 +290,16 @@ it.layer(NodeServices.layer)("server self update", (it) => {
         requestUpdate: () =>
           Deferred.succeed(requested, undefined).pipe(Effect.andThen(Deferred.await(accepted))),
       });
-      const first = yield* Effect.forkChild(selfUpdate.update({ targetVersion: "1.1.0" }), {
-        startImmediately: true,
-      });
-      yield* Deferred.await(requested);
-      expect((yield* selfUpdate.update({ targetVersion: "1.1.1" }).pipe(Effect.flip)).reason).toBe(
-        "A server update is already in progress.",
+      const first = yield* Effect.forkChild(
+        selfUpdate.update({ targetVersion: "1.1.0-netpro2k" }),
+        {
+          startImmediately: true,
+        },
       );
+      yield* Deferred.await(requested);
+      expect(
+        (yield* selfUpdate.update({ targetVersion: "1.1.1-netpro2k.1" }).pipe(Effect.flip)).reason,
+      ).toBe("A server update is already in progress.");
       yield* Deferred.succeed(accepted, "launcher-id");
       expect((yield* Fiber.join(first)).updateId).toBe("launcher-id");
     }),
@@ -201,7 +319,7 @@ it.layer(NodeServices.layer)("server self update", (it) => {
       });
 
       const consumed = yield* ServerSelfUpdate.updateProgressStream(selfUpdate, {
-        targetVersion: "1.1.0",
+        targetVersion: "1.1.0-netpro2k",
       }).pipe(
         Stream.tap((event) =>
           event.type === "progress" && event.stage === "downloading"
@@ -220,10 +338,10 @@ it.layer(NodeServices.layer)("server self update", (it) => {
 
       yield* Deferred.succeed(releaseDownload, undefined);
       yield* Deferred.await(accepted);
-      expect(order).toEqual(["download", "extract", "preflight", "accept"]);
-      expect((yield* selfUpdate.update({ targetVersion: "1.1.0" }).pipe(Effect.flip)).reason).toBe(
-        "A server update is already in progress.",
-      );
+      expect(order).toEqual(["publication", "download", "extract", "preflight", "accept"]);
+      expect(
+        (yield* selfUpdate.update({ targetVersion: "1.1.0-netpro2k" }).pipe(Effect.flip)).reason,
+      ).toBe("A server update is already in progress.");
     }),
   );
 });

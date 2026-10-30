@@ -253,6 +253,7 @@ const stageWebClient = Effect.fn("stageWebClient")(function* (source: string, ta
 
 const MacSigningConfig = Config.all({
   identity: Config.String("T3CODE_CLI_MAC_SIGN_IDENTITY").pipe(Config.option),
+  keychain: Config.String("CSC_KEYCHAIN").pipe(Config.option),
   appleApiKey: Config.String("APPLE_API_KEY").pipe(Config.option),
   appleApiKeyId: Config.String("APPLE_API_KEY_ID").pipe(Config.option),
   appleApiIssuer: Config.String("APPLE_API_ISSUER").pipe(Config.option),
@@ -286,6 +287,7 @@ const signMacArchiveContents = Effect.fn("signMacArchiveContents")(function* (in
         "--force",
         "--sign",
         identity,
+        ...(Option.isSome(signing.keychain) ? ["--keychain", signing.keychain.value] : []),
         ...(identity === "-" ? [] : ["--options", "runtime", "--timestamp"]),
         ...(target === input.executablePath ? ["--entitlements", entitlements] : []),
         target,
