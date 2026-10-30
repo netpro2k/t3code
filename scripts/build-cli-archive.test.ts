@@ -12,6 +12,7 @@ import { ChildProcess, ChildProcessSpawner } from "effect/process";
 import { awaitCliNotarization, signMacArchiveContents } from "./build-cli-archive.ts";
 
 const signedEnv = {
+  CSC_KEYCHAIN: "/tmp/fork-signing.keychain-db",
   T3CODE_CLI_MAC_SIGN_IDENTITY: "Developer ID Application: Test (TEAM)",
   APPLE_API_KEY: "/tmp/AuthKey_TEST.p8",
   APPLE_API_KEY_ID: "TEST",
@@ -98,6 +99,15 @@ it.layer(NodeServices.layer)("build-cli-archive notarization", (it) => {
           }),
           stub,
         );
+        const signing = stub.calls.find((argv) => argv[0] === "codesign");
+        assert.deepEqual(signing?.slice(1, 7), [
+          "--force",
+          "--sign",
+          signedEnv.T3CODE_CLI_MAC_SIGN_IDENTITY,
+          "--keychain",
+          signedEnv.CSC_KEYCHAIN,
+          "--options",
+        ]);
         assert.equal(yield* fs.readFileString(content.submissionFile), "new-id");
         const [submit] = notarySubcommands(stub.calls);
         assert.equal(submit?.[0], "submit");
