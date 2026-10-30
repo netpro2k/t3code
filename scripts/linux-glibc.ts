@@ -3,10 +3,11 @@ import * as NodeChildProcess from "node:child_process";
 import * as NodeFSP from "node:fs/promises";
 import * as NodePath from "node:path";
 import * as NodeUtil from "node:util";
+import { isForkReleaseVersion } from "@t3tools/shared/cliRelease";
 
 // Both Linux release jobs build on Ubuntu 24.04; this is a build ceiling, not a distro support promise.
 const GLIBC_BUILD_CEILING = "2.39";
-const readelf = NodeUtil.promisify(NodeChildProcess.execFile);
+const execFile = NodeUtil.promisify(NodeChildProcess.execFile);
 
 function compareVersions(left: string, right: string): number {
   const a = left.split(".").map(Number);
@@ -40,6 +41,14 @@ export async function scanGlibcNeeds(appOutDir: string): Promise<{
   minimum: string;
   elfCount: number;
 }> {
+  let ceiling = GLIBC_BUILD_CEILING;
+  if (isForkReleaseVersion(process.env.APP_VERSION ?? "")) {
+    const { stdout } = await execFile("getconf", ["GNU_LIBC_VERSION"]);
+    const hostVersion = /^glibc (\d+\.\d+)\s*$/.exec(stdout)?.[1];
+    if (!hostVersion)
+      throw new Error(`Cannot determine the fork build host's glibc: ${stdout.trim()}`);
+    ceiling = hostVersion;
+  }
   let minimum: string | undefined;
   let elfCount = 0;
   async function walk(directory: string): Promise<void> {
@@ -63,16 +72,14 @@ export async function scanGlibcNeeds(appOutDir: string): Promise<{
       elfCount++;
       try {
         // readelf inspects either release architecture without executing the binary.
-        const { stdout, stderr } = await readelf("readelf", ["--wide", "--version-info", file], {
+        const { stdout, stderr } = await execFile("readelf", ["--wide", "--version-info", file], {
           env: { ...process.env, LC_ALL: "C" },
           maxBuffer: 16 * 1024 * 1024,
         });
         if (stderr.trim()) throw new Error(stderr.trim());
         const required = parseGlibcNeeds(stdout);
-        if (required && compareVersions(required, GLIBC_BUILD_CEILING) > 0) {
-          throw new Error(
-            `requires GLIBC_${required}, exceeding build ceiling ${GLIBC_BUILD_CEILING}`,
-          );
+        if (required && compareVersions(required, ceiling) > 0) {
+          throw new Error(`requires GLIBC_${required}, exceeding build ceiling ${ceiling}`);
         }
         if (required && (!minimum || compareVersions(required, minimum) > 0)) minimum = required;
       } catch (cause) {
@@ -86,7 +93,7 @@ export async function scanGlibcNeeds(appOutDir: string): Promise<{
   await walk(appOutDir);
   if (elfCount === 0 || !minimum) throw new Error(`No glibc requirements found in ${appOutDir}`);
   console.log(
-    `[linux-glibc] ${elfCount} ELF files; requires glibc >= ${minimum}; build ceiling ${GLIBC_BUILD_CEILING}`,
+    `[linux-glibc] ${elfCount} ELF files; requires glibc >= ${minimum}; build ceiling ${ceiling}`,
   );
   return { minimum, elfCount };
 }
