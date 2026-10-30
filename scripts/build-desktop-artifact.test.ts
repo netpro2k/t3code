@@ -511,7 +511,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
       const release = yield* createBuildConfig(
         "mac",
         "dmg",
-        "0.0.33",
+        "0.0.33-netpro2k",
         false,
         false,
         undefined,
@@ -533,9 +533,10 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
       assert.deepStrictEqual(release.publish, [
         {
           provider: "github",
-          owner: "pingdotgg",
+          owner: "netpro2k",
           repo: "t3code",
           releaseType: "release",
+          channel: "latest",
         },
       ]);
     }).pipe(

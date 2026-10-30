@@ -16,6 +16,7 @@ import {
 } from "@electron/asar";
 
 import { fromYaml } from "@t3tools/shared/schemaYaml";
+import { CLI_RELEASE_REPOSITORY, isForkReleaseVersion } from "@t3tools/shared/cliRelease";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import { clerkFrontendApiHostnameFromPublishableKey } from "@t3tools/shared/relayAuth";
 import { resolveSpawnCommand } from "@t3tools/shared/shell";
@@ -2688,30 +2689,18 @@ export function resolveDesktopRuntimeDependencies(
   );
 }
 
-export const resolveGitHubPublishConfig = Effect.fn("resolveGitHubPublishConfig")(function* (
+export const resolveGitHubPublishConfig = Effect.fn("resolveGitHubPublishConfig")(function (
   updateChannel: "latest" | "nightly",
 ) {
-  const env = yield* Config.all({
-    updateRepository: Config.String("T3CODE_DESKTOP_UPDATE_REPOSITORY").pipe(Config.option),
-    githubRepository: Config.String("GITHUB_REPOSITORY").pipe(Config.option),
-  });
-  const rawRepo = (
-    Option.getOrUndefined(env.updateRepository)?.trim() ||
-    Option.getOrUndefined(env.githubRepository)?.trim() ||
-    ""
-  ).trim();
-  if (!rawRepo) return undefined;
+  const [owner = "", repo = ""] = CLI_RELEASE_REPOSITORY.split("/");
 
-  const [owner, repo, ...rest] = rawRepo.split("/");
-  if (!owner || !repo || rest.length > 0) return undefined;
-
-  return {
+  return Effect.succeed({
     provider: "github",
     owner,
     repo,
     releaseType: updateChannel === "nightly" ? "prerelease" : "release",
-    ...(updateChannel === "nightly" ? { channel: "nightly" as const } : {}),
-  };
+    channel: updateChannel,
+  });
 });
 
 export function resolveDesktopUpdateChannel(version: string): "latest" | "nightly" {
@@ -2812,23 +2801,27 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
   // Missing publish config infers a GitHub feed from tokens; staging has no repository, so manifest generation would crash.
   buildConfig.publish = null;
   if (!isDesktopPreviewVersion(version)) {
-    const publishConfig = yield* resolveGitHubPublishConfig(updateChannel);
-    if (publishConfig) {
-      buildConfig.publish = [publishConfig];
-    } else if (mockUpdates) {
+    if (mockUpdates) {
       buildConfig.publish = [
         {
           provider: "generic",
           url: resolveMockUpdateServerUrl(mockUpdateServerPort),
         },
       ];
+    } else {
+      buildConfig.publish = [yield* resolveGitHubPublishConfig(updateChannel)];
     }
   }
 
   if (platform === "mac") {
     const path = yield* Path.Path;
     const repoRoot = yield* RepoRoot;
+    const signingEnvironment = yield* HostProcess.Environment;
     buildConfig.mac = {
+      // The custom signer selects our pinned local certificate, bypassing Apple identity discovery.
+      ...(signed && isForkReleaseVersion(version) && signingEnvironment.T3CODE_SIGNING_DIRECTORY
+        ? { identity: "-" }
+        : {}),
       target: target === "dmg" ? [target, "zip"] : [target],
       icon: "icon.icns",
       category: "public.app-category.developer-tools",
@@ -3811,10 +3804,15 @@ const buildDesktopArtifactUnlocked = Effect.fn("buildDesktopArtifactUnlocked")(f
   const stageProdResourcesDir = path.join(stageAppDir, "apps/desktop/prod-resources");
   yield* fs.copy(stageResourcesDir, stageProdResourcesDir);
 
+  const macSigningEnvironment =
+    options.platform === "mac" && options.signed ? loadRepoEnv({ repoRoot }) : undefined;
+  // Personal fork builds need a stable signature; restricted passkey entitlements remain opt-in.
   const configuredMacPasskeySigning =
-    options.platform === "mac" && options.signed
+    macSigningEnvironment &&
+    (!isForkReleaseVersion(appVersion) ||
+      macSigningEnvironment.T3CODE_MACOS_PROVISIONING_PROFILE?.trim())
       ? yield* Effect.try({
-          try: () => resolveMacPasskeySigningConfiguration(loadRepoEnv({ repoRoot })),
+          try: () => resolveMacPasskeySigningConfiguration(macSigningEnvironment),
           catch: MacPasskeySigningConfigurationResolutionError.fromCause,
         })
       : undefined;

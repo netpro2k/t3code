@@ -283,7 +283,12 @@ describe("collectRestartingMachines", () => {
       overrides: Partial<UpdateEverythingMachine> = {},
       enabled = false,
     ) => {
-      const base = machine(id, "0.0.40", "boot-service", overrides);
+      const base = machine(
+        id,
+        "0.0.40",
+        overrides.hostedByThisApp ? "desktop-managed" : "boot-service",
+        overrides,
+      );
       return {
         ...base,
         serverConfig: {
