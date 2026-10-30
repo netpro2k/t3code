@@ -5,6 +5,7 @@ import { APP_VERSION } from "~/branding";
 import { isDesktopLocalConnectionTarget } from "~/connection/desktopLocal";
 import { isElectron } from "~/env";
 import { useEnvironments } from "~/state/environments";
+import { useForkReleasePublished } from "~/state/forkRelease";
 import { environmentIdsKey } from "~/state/environmentAtomList";
 import { environmentUpdateStatesAtom } from "~/state/server";
 import { environmentSessionStatesAtom } from "~/state/session";
@@ -21,6 +22,7 @@ import {
   describeUpdateEverything,
   runUpdateEverything,
   type UpdateRunMachine,
+  type SkippedMachine,
 } from "./updateEverything.logic";
 import {
   clearSavedUpdateEverythingResult,
@@ -40,6 +42,7 @@ export function isHostedByThisApp(
 ) {
   return (
     isElectron &&
+    environment.serverConfig?.environment.capabilities.serverSelfUpdate !== "boot-service" &&
     (environment.entry.target._tag === "PrimaryConnectionTarget" ||
       isDesktopLocalConnectionTarget(environment.entry.target))
   );
@@ -66,9 +69,25 @@ export function useUpdateEverything(
     canMaintain: canUpdateServer(sessionStates[index]!),
     updateState: updateStates[index]!,
   }));
-  const { targets: servers, skipped } = channelSwitch
+  const { targets: behindServers, skipped: unreachable } = channelSwitch
     ? collectChannelSwitchTargets(machines, channelSwitch)
     : collectServerUpdateTargets(machines, targetVersion);
+  // Standalone servers require our published archive, including server-only updates.
+  const needsArchive = behindServers.some((server) => server.selfUpdate !== "desktop-managed");
+  const published = useForkReleasePublished(needsArchive ? targetVersion : null);
+  const servers = published
+    ? behindServers
+    : behindServers.filter((server) => server.selfUpdate === "desktop-managed");
+  const skipped: ReadonlyArray<SkippedMachine> = [
+    ...unreachable,
+    ...behindServers
+      .filter((server) => !servers.includes(server))
+      .map((server) => ({
+        environmentId: server.environmentId,
+        label: server.serverLabel,
+        reason: `t3@${targetVersion} has no published fork server archive yet`,
+      })),
+  ];
   // Track-only hosts save a setting and restart nothing, so they are neither listed nor counted.
   const moving = servers.filter((server) => server.trackOnly !== true);
   const restarts = collectRestartingMachines(machines, moving, localUpdateVersion !== null);

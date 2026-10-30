@@ -6,6 +6,7 @@ import type {
 } from "@t3tools/contracts";
 import type { ServerUpdateState } from "@t3tools/client-runtime/state/server";
 import { compareSemverVersions, parseSemver } from "@t3tools/shared/semver";
+import { isForkReleaseVersion } from "@t3tools/shared/cliRelease";
 import * as Schema from "effect/Schema";
 
 import { APP_VERSION } from "./branding";
@@ -56,14 +57,15 @@ export function resolveVersionMismatch(
 
   const clientCore = versionCore(normalizedClientVersion);
   const serverCore = versionCore(normalizedServerVersion);
-  const compareNightlyBuilds =
-    parseSemver(normalizedClientVersion)?.prerelease[0] === "nightly" &&
-    parseSemver(normalizedServerVersion)?.prerelease[0] === "nightly";
+  const clientTrain = parseSemver(normalizedClientVersion)?.prerelease[0];
+  const compareFullVersions =
+    (clientTrain === "nightly" || clientTrain === "netpro2k") &&
+    parseSemver(normalizedServerVersion)?.prerelease[0] === clientTrain;
   const serverIsBehind =
     parseSemver(clientCore) && parseSemver(serverCore)
       ? compareSemverVersions(
-          compareNightlyBuilds ? normalizedServerVersion : serverCore,
-          compareNightlyBuilds ? normalizedClientVersion : clientCore,
+          compareFullVersions ? normalizedServerVersion : serverCore,
+          compareFullVersions ? normalizedClientVersion : clientCore,
         ) < 0
       : normalizedServerVersion !== normalizedClientVersion;
   if (!serverIsBehind) {
@@ -99,6 +101,7 @@ export function manualServerUpdateCommand(
   targetVersion: string,
   installation?: ServerInstallation,
 ): string {
+  if (isForkReleaseVersion(targetVersion)) return `t3 update ${targetVersion}`;
   if (installation?.kind === "npm-global") {
     const prefix = `'${installation.prefix.replaceAll("'", "'\\''")}'`;
     return `npm install --global --prefix ${prefix} t3@${targetVersion}`;

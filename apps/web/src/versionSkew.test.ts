@@ -85,7 +85,33 @@ describe("versionSkew", () => {
     },
   );
 
-  // regression: #7579 versions were compared as strings, not semver
+  it("does not warn when a nightly server is ahead on the same release", () => {
+    branding.APP_VERSION = "0.0.34-nightly.20260824.1125";
+
+    expect(resolveVersionMismatch("0.0.34-nightly.20260824.1126")).toBeNull();
+  });
+
+  it("offers newer fork revisions without treating a newer server as outdated", () => {
+    expect(resolveVersionMismatch("0.0.43-netpro2k.2", "0.0.43-netpro2k.10")).toEqual({
+      clientVersion: "0.0.43-netpro2k.10",
+      serverVersion: "0.0.43-netpro2k.2",
+      hint: MISMATCH_HINT,
+    });
+    expect(resolveVersionMismatch("0.0.43-netpro2k.10", "0.0.43-netpro2k.2")).toBeNull();
+    expect(resolveVersionMismatch("0.0.43-netpro2k.2", "0.0.43-netpro2k.2")).toBeNull();
+  });
+
+  it("offers the first numbered build after the unnumbered fork release", () => {
+    expect(resolveVersionMismatch("0.0.45-netpro2k", "0.0.45-netpro2k.1")?.serverVersion).toBe(
+      "0.0.45-netpro2k",
+    );
+    expect(resolveVersionMismatch("0.0.45-netpro2k.1", "0.0.45-netpro2k")).toBeNull();
+  });
+
+  it("uses the archive updater for fork versions instead of npm", () => {
+    expect(manualServerUpdateCommand("0.0.43-netpro2k.1")).toBe("t3 update 0.0.43-netpro2k.1");
+  });
+
   it("treats a nightly server built past the client as ahead, not skew", () => {
     expect(resolveVersionMismatch("0.0.35-nightly.20260818.1124")).toBeNull();
   });
