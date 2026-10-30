@@ -5,7 +5,7 @@ import { APP_VERSION } from "~/branding";
 import { isDesktopLocalConnectionTarget } from "~/connection/desktopLocal";
 import { isElectron } from "~/env";
 import { useEnvironments } from "~/state/environments";
-import { useNpmReleasePublished } from "~/state/npmRelease";
+import { useForkReleasePublished } from "~/state/forkRelease";
 import { environmentIdsKey } from "~/state/environmentAtomList";
 import { environmentUpdateStatesAtom } from "~/state/server";
 import { environmentSessionStatesAtom } from "~/state/session";
@@ -42,6 +42,7 @@ export function isHostedByThisApp(
 ) {
   return (
     isElectron &&
+    environment.serverConfig?.environment.capabilities.serverSelfUpdate !== "boot-service" &&
     (environment.entry.target._tag === "PrimaryConnectionTarget" ||
       isDesktopLocalConnectionTarget(environment.entry.target))
   );
@@ -68,18 +69,15 @@ export function useUpdateEverything(
     canMaintain: canUpdateServer(sessionStates[index]!),
     updateState: updateStates[index]!,
   }));
-  // A track switch's target came from npm already.
-  const {
-    targets: behindServers,
-    skipped: unreachable,
-    waitForNpm,
-  } = channelSwitch
-    ? { ...collectChannelSwitchTargets(machines, channelSwitch), waitForNpm: [] }
+  const { targets: behindServers, skipped: unreachable } = channelSwitch
+    ? collectChannelSwitchTargets(machines, channelSwitch)
     : collectServerUpdateTargets(machines, targetVersion, localUpdateVersion !== null);
-  const published = useNpmReleasePublished(waitForNpm.length > 0 ? targetVersion : null);
+  // Standalone servers require our published archive, including server-only updates.
+  const needsArchive = behindServers.some((server) => server.selfUpdate !== "desktop-managed");
+  const published = useForkReleasePublished(needsArchive ? targetVersion : null);
   const servers = published
     ? behindServers
-    : behindServers.filter((server) => !waitForNpm.includes(server));
+    : behindServers.filter((server) => server.selfUpdate === "desktop-managed");
   const skipped: ReadonlyArray<SkippedMachine> = [
     ...unreachable,
     ...behindServers
@@ -87,7 +85,7 @@ export function useUpdateEverything(
       .map((server) => ({
         environmentId: server.environmentId,
         label: server.serverLabel,
-        reason: `t3@${targetVersion} is not on npm yet`,
+        reason: `t3@${targetVersion} has no published fork server archive yet`,
       })),
   ];
   // Track-only hosts save a setting and restart nothing, so they are neither listed nor counted.

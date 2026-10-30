@@ -3,7 +3,8 @@ import * as Schema from "effect/Schema";
 
 import { compareSemverVersions } from "./semver.ts";
 
-const CLI_RELEASE_REPOSITORY = "pingdotgg/t3code";
+// Keep discovery and downloads on the same fork.
+export const CLI_RELEASE_REPOSITORY = "netpro2k/t3code";
 export const CLI_RELEASES_PAGE_URL = `https://github.com/${CLI_RELEASE_REPOSITORY}/releases`;
 export const CLI_RELEASE_CHECKSUMS_FILE = "SHA256SUMS";
 export const CLI_RELEASE_BASE_URL_ENV = "T3CODE_RELEASE_BASE_URL";
@@ -104,6 +105,39 @@ export function cliReleaseIndexPageUrl(page: number): string {
   return `https://api.github.com/repos/${CLI_RELEASE_REPOSITORY}/releases?per_page=100&page=${page}`;
 }
 
+export function cliReleaseTagUrl(version: string): string {
+  return `https://api.github.com/repos/${CLI_RELEASE_REPOSITORY}/releases/tags/v${encodeURIComponent(version)}`;
+}
+
+/** Unique fork versions cannot collide with an upstream runtime already on disk. */
+export function isForkReleaseVersion(version: string): boolean {
+  return /^\d+\.\d+\.\d+-netpro2k(?:\.[1-9]\d*)?$/.test(version);
+}
+
+export const CliRelease = Schema.Struct({
+  tag_name: Schema.String,
+  draft: Schema.Boolean,
+  assets: Schema.Array(Schema.Struct({ name: Schema.String })),
+});
+
+/** A tag alone is not an installable release; both archive and checksums must exist. */
+export function cliReleaseHasArchive(
+  release: typeof CliRelease.Type,
+  version: string,
+  platformKey?: CliArchivePlatformKey,
+): boolean {
+  if (!isForkReleaseVersion(version) || release.draft || release.tag_name !== `v${version}`) {
+    return false;
+  }
+  const names = new Set(release.assets.map((asset) => asset.name));
+  return (
+    names.has(CLI_RELEASE_CHECKSUMS_FILE) &&
+    (platformKey === undefined ? CLI_ARCHIVE_PLATFORM_KEYS : [platformKey]).some((key) =>
+      names.has(cliArchiveFileName(version, key)),
+    )
+  );
+}
+
 /** Draft assets are not downloadable. */
 export function newestCliReleaseVersion(
   releases: ReadonlyArray<{
@@ -116,6 +150,7 @@ export function newestCliReleaseVersion(
     if (release.draft) continue;
     const version = /^v(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)$/.exec(release.tag_name)?.[1];
     if (version === undefined) continue;
+    if (channel === "stable" && !isForkReleaseVersion(version)) continue;
     if (cliReleaseChannelOf(version) === channel) return version;
   }
   return undefined;

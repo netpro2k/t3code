@@ -33,6 +33,13 @@ export interface RestartingMachine {
   readonly continuesThreads: boolean;
 }
 
+function updatesWithThisApp(machine: UpdateEverythingMachine): boolean {
+  return (
+    machine.hostedByThisApp &&
+    machine.serverConfig?.environment.capabilities.serverSelfUpdate !== "boot-service"
+  );
+}
+
 export function collectRestartingMachines(
   machines: ReadonlyArray<UpdateEverythingMachine>,
   servers: ReadonlyArray<Pick<ServerUpdateTarget, "environmentId">>,
@@ -44,7 +51,7 @@ export function collectRestartingMachines(
     if (
       config === null ||
       !machine.connected ||
-      !(updated.has(machine.environmentId) || (installsLocal && machine.hostedByThisApp))
+      !(updated.has(machine.environmentId) || (installsLocal && updatesWithThisApp(machine)))
     ) {
       return [];
     }
@@ -84,7 +91,7 @@ export function collectServerUpdateTargets(
   const waitForNpm: ServerUpdateTarget[] = [];
   for (const machine of machines) {
     const config = machine.serverConfig;
-    if (machine.hostedByThisApp) continue;
+    if (updatesWithThisApp(machine)) continue;
     if (
       config !== null &&
       resolveVersionMismatch(config.environment.serverVersion, targetVersion) === null

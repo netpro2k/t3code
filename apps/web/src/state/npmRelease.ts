@@ -1,8 +1,7 @@
-import { useAtomValue } from "@effect/atom-react";
 import { npmReleaseDatabaseMigration } from "@t3tools/shared/cliRelease";
 import * as Effect from "effect/Effect";
 import { FetchHttpClient, HttpClient, HttpClientResponse } from "effect/http";
-import { AsyncResult, Atom } from "effect/reactivity";
+import { Atom } from "effect/reactivity";
 
 export interface NpmRelease {
   readonly version: string;
@@ -41,18 +40,3 @@ export const npmReleaseAtom = Atom.family((spec: string) =>
     ),
   ).pipe(Atom.withRefresh("5 minutes"), Atom.withLabel(`npm-release:${spec}`)),
 );
-
-export const npmReleasePublishedAtom = Atom.family((version: string) =>
-  Atom.make((get) =>
-    get.result(npmReleaseAtom(version)).pipe(Effect.map((release) => release?.version === version)),
-  ).pipe(Atom.keepAlive, Atom.withLabel(`npm-release-published:${version}`)),
-);
-
-const NO_VERSION_ATOM = Atom.make(AsyncResult.success(false)).pipe(
-  Atom.withLabel("npm-release-published:none"),
-);
-
-export function useNpmReleasePublished(version: string | null): boolean {
-  const result = useAtomValue(version ? npmReleasePublishedAtom(version) : NO_VERSION_ATOM);
-  return AsyncResult.getOrElse(result, () => false);
-}

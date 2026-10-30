@@ -35,7 +35,7 @@ import * as ElectronWindow from "../electron/ElectronWindow.ts";
 import * as IpcChannels from "../ipc/channels.ts";
 import * as DesktopAppSettings from "../settings/DesktopAppSettings.ts";
 import { normalizeDesktopUpdateReleaseNotes } from "./releaseNotes.ts";
-import { desktopUpdateChannelOf } from "@t3tools/shared/cliRelease";
+import { desktopUpdateChannelOf, isForkReleaseVersion } from "@t3tools/shared/cliRelease";
 import { compareSemverVersions } from "@t3tools/shared/semver";
 import {
   createInitialDesktopUpdateState,
@@ -350,6 +350,7 @@ export const make = Effect.gen(function* () {
   const electronUpdater = yield* ElectronUpdater.ElectronUpdater;
   const electronWindow = yield* ElectronWindow.ElectronWindow;
   const environment = yield* DesktopEnvironment.DesktopEnvironment;
+  const forkBuild = isForkReleaseVersion(environment.appVersion);
   const fileSystem = yield* FileSystem.FileSystem;
   const desktopSettings = yield* DesktopAppSettings.DesktopAppSettings;
 
@@ -370,6 +371,7 @@ export const make = Effect.gen(function* () {
     Ref.get(releaseFloorRef).pipe(
       Effect.map(
         (floor) =>
+          (!forkBuild || isForkReleaseVersion(version)) &&
           desktopUpdateChannelOf(version) === state.channel &&
           (Option.isSome(floor)
             ? compareSemverVersions(version, floor.value) >= 0
@@ -380,7 +382,7 @@ export const make = Effect.gen(function* () {
     createInitialDesktopUpdateState(
       environment.appVersion,
       environment.runtimeInfo,
-      environment.defaultDesktopSettings.updateChannel,
+      forkBuild ? "latest" : environment.defaultDesktopSettings.updateChannel,
     ),
   );
 
@@ -1091,8 +1093,9 @@ export const make = Effect.gen(function* () {
       }
 
       const settings = yield* desktopSettings.get;
+      const channel = forkBuild ? "latest" : settings.updateChannel;
       const disabledReason = yield* resolveDisabledReason;
-      yield* setState(yield* baseUpdateState(settings.updateChannel, disabledReason));
+      yield* setState(yield* baseUpdateState(channel, disabledReason));
       if (Option.isSome(disabledReason)) {
         return;
       }
@@ -1100,7 +1103,7 @@ export const make = Effect.gen(function* () {
 
       yield* electronUpdater.setAutoDownload(false);
       yield* electronUpdater.setAutoInstallOnAppQuit(false);
-      yield* applyAutoUpdaterChannel(settings.updateChannel);
+      yield* applyAutoUpdaterChannel(channel);
       yield* electronUpdater.setDisableDifferentialDownload(
         isArm64HostRunningIntelBuild(environment.runtimeInfo),
       );
@@ -1137,9 +1140,10 @@ export const make = Effect.gen(function* () {
       yield* startUpdatePollers;
     }).pipe(Effect.withSpan("desktop.updates.configure")),
     setChannel: Effect.fn("desktop.updates.setChannel")(function* (
-      nextChannel: DesktopUpdateChannel,
+      requestedChannel: DesktopUpdateChannel,
       options?: { readonly minimumVersion?: string | undefined },
     ) {
+      const nextChannel = forkBuild ? "latest" : requestedChannel;
       yield* Effect.annotateCurrentSpan({ channel: nextChannel });
       // A background check holds the updater only briefly, so wait it out instead of refusing.
       const activeAction = yield* tryStartChannelChange.pipe(

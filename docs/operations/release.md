@@ -2,7 +2,157 @@
 
 > For maintainers. Using T3 Code? See [docs/user](../user/).
 
-This document covers the unified release workflow for stable and nightly desktop releases.
+## This fork: native builds and GitHub-hosted updates
+
+This fork uses `netpro2k/t3code` releases for desktop and server updates. npm and
+upstream publication do not make an update available. CI is optional: the release
+command builds on the Mac and Linux hosts and publishes through `gh`.
+
+Use `0.1.4-netpro2k` for the audited stack on upstream `v0.1.4`; additional builds
+use `.1`, `.2`, and so on. Never reuse a published version. Despite the SemVer
+suffix, these are regular GitHub releases marked latest, with `latest*.yml`
+manifests. GitHub prereleases are not the fork's stable update feed.
+
+### Build and publish
+
+Commit the audited patch stack, run `vp run check:changed`, and push the exact
+commit to the fork. Select the Node version pinned in that commit's root
+`package.json` on both build machines. Native builds need the same platform tools
+as the existing desktop builder, including Rust. macOS automatic updates need a
+consistent certificate signature. On Studio, set up the private local identity once:
+
+```sh
+bash scripts/fork-signing.sh setup
+source "$HOME/.config/t3code/signing/environment.sh"
+```
+
+Setup generates a 3072-bit RSA signing key and an independent random 256-bit unlock
+password using OpenSSL's cryptographic randomness. It verifies two different signed
+executables against the same designated certificate requirement. Private material
+stays outside the checkout in an owner-only directory: the keychain, encrypted
+PKCS#8 backup, and password files are never release assets. Keep a secure backup of
+that directory; recreating the certificate would require another manual Desktop
+installation. The release command unlocks only this dedicated keychain, with its
+password sent over stdin. It does not need access to the login keychain.
+
+`T3CODE_CLI_MAC_SIGN_IDENTITY` selects the same certificate for Desktop and the server
+archive, and `CSC_KEYCHAIN` selects its keychain. The packaged signature contains the
+public certificate and is checked against the configured fingerprint. For these
+personal builds, notarization and restricted passkey entitlements remain optional.
+To notarize with an Apple Developer ID certificate, provide `APPLE_API_KEY`,
+`APPLE_API_KEY_ID`, and `APPLE_API_ISSUER`. To enable restricted passkey entitlements,
+also configure the profile, team, and RP domains required by the desktop builder.
+Use absolute paths for keychain, API key and profile files. Do not commit private
+signing configuration or copy it into build staging.
+
+The builder carries only the public Clerk key, JWT template, CLI OAuth client ID,
+and relay URL from the checkout's environment files into the disposable worktree.
+Use the same public configuration on both hosts; publication checks its fingerprint
+as well as the source commit. Signing configuration comes from exported environment
+variables, not copied private configuration files.
+
+Linux builds need `patchelf` and the installed `libatomic.so.1` package. The archive
+bundles that library with its license and the package source reference from dpkg
+(Ubuntu) or pacman (Arch Linux).
+
+Run this on each native host, passing the same exact commit and version:
+
+```sh
+node scripts/fork-release.ts build --version 0.1.4-netpro2k \
+  --ref <patched-commit-sha> --dir /absolute/path/t3-releases/0.1.4-netpro2k
+```
+
+The command uses a disposable worktree beside the checkout and leaves the working
+install alone. It builds the desktop (Mac DMG plus updater ZIP; Linux AppImage plus
+DEB), builds the standalone server archive, smoke-tests that archive against isolated
+state, and verifies the desktop manifest's version, sizes, and SHA-512 digests.
+Mac builds verify the packaged app's signature; notarized builds also pass Gatekeeper assessment. The
+output contains one directory per native target and a `build.json` receipt binding
+its assets to the source commit. Default release targets are `darwin-arm64` and
+`linux-x64`; an additional native Linux ARM64 build can be included with
+`--targets darwin-arm64,linux-x64,linux-arm64` on validation and publication.
+
+Copy the complete target directories into one release directory, preserving their
+receipts. With `gh` authenticated for write access to the fork:
+
+```sh
+node scripts/fork-release.ts validate --version 0.1.4-netpro2k --dir /path/to/release
+node scripts/fork-release.ts upload --version 0.1.4-netpro2k --dir /path/to/release \
+  --notes /path/to/release-notes.md
+node scripts/fork-release.ts publish --version 0.1.4-netpro2k --dir /path/to/release \
+  --notes /path/to/release-notes.md
+```
+
+`upload` creates or resumes a draft. `publish` can also do the entire upload in one
+command. Both require all selected targets from one commit, generate `SHA256SUMS`
+for the server archives, upload only recognized artifacts, and verify GitHub's
+asset digests before proceeding. A different existing asset is never overwritten;
+use a new revision instead. Debug configs, unpacked apps, credentials, and receipts
+are not uploaded. Publication makes the completed release available to clients;
+it does not force an installation on running machines.
+
+### One-time rollout from the source-run install
+
+The existing `update-mac.sh` and `update-linux.sh` build/install from the checkout.
+They do not publish releases, assign fork revisions, or install the service launcher
+needed by remote server updates. Do not use them to bootstrap the release channel.
+
+For the first rollout, prepare both published packages before stopping anything:
+
+1. Download and verify the fork CLI archive against the published `SHA256SUMS` and
+   stage the matching desktop package. Preserve the current app and service files
+   for recovery, and arrange database backup while the service is stopped.
+2. Hand the cutover to an OS-owned process outside the running server, using the
+   existing detached-cutover helpers as the model. Quit Desktop, stop the exact
+   old service, and confirm its recorded PID has exited. On Mac, unload both the
+   fork's `com.netpro2k.t3code.server` job and any legacy
+   `com.t3tools.t3code.service` job before installing the launcher.
+3. Preserve the existing T3 home, provider PATH, and Tailscale HTTPS port 8443.
+   The launcher reads optional `<T3 home>/service.env`; configure
+   `T3CODE_TAILSCALE_SERVE=true` and `T3CODE_TAILSCALE_SERVE_PORT=8443` there.
+4. Provision Desktop's saved administrative session offline, install the released
+   executable with `t3 service install --base-dir <T3 home>`, and repoint the CLI
+   shim to the release installation. The native service installer uses
+   `t3code.service` on Linux and `com.t3tools.t3code.service` on Mac.
+5. Install the signed Mac app in Applications and the Linux AppImage at its stable
+   writable path. Keep Local Environment enabled so this fork attaches to the
+   background server. Verify the server advertises `serverSelfUpdate: boot-service`,
+   both client and server report the fork version, and Desktop connects locally.
+
+Run the initial migration from raw Codex outside the server being replaced, or hand
+it to an OS-owned detached process. The source installers are not a release bootstrap.
+The offline session provisioner accepts a standalone CLI with
+`node scripts/provision-desktop-session.ts /path/to/t3 <T3 home> --executable`.
+Run it only after stopping the server.
+
+A provisioned private `desktop-session.json` opts that T3 home into renewal. The
+running server checks it at startup and daily, renewing within seven days of its
+30-day expiry. It also recovers expired sessions after a long shutdown. Revoked or
+restricted sessions are not renewed. Rotation leaves the previous token valid until
+its original expiry, and Desktop rereads the saved credential within five minutes
+without needing an application update or relaunch. Missing or corrupt provisioning
+still needs an offline repair.
+
+### Subsequent updates
+
+Audit/rebase the patch stack onto the next exact official release, then repeat the
+native build and publish commands with a new fork version. A build coordinator,
+cron job, or T3 automation can invoke these commands; no GitHub Actions or npm
+publication is needed. Rebasing conflicts still require an audited resolution.
+
+Clients discover the new desktop release from the fork feed. Update Everything
+updates launcher-managed servers separately, waits for their restart, then installs
+and relaunches Desktop. The server independently rejects upstream-only targets,
+unpublished releases, or releases missing its archive/checksums before cache reuse
+or launcher handoff. The official mobile client remains unchanged and cannot force
+a standalone fork server onto an upstream build.
+
+Test the first upgrade from `0.1.4-netpro2k` to the next fork release on both machines:
+server handoff/reconnect, desktop replacement/relaunch, preserved local file actions,
+and rejection of an upstream-only server target. Repeat with `.1` to test a rebuild
+of the same upstream version. Keep Mac signing identity and app identity consistent.
+
+The sections below describe upstream's inherited stable/nightly workflow as reference.
 
 Beta is the product label, not a release channel or version suffix. Release channels
 remain stable and nightly. To ship 0.1.0 Beta, use `channel=stable` and
@@ -424,41 +574,21 @@ One-time Vercel dashboard setup:
 
 ## Server self-update release invariant
 
-Connected servers update to the client's exact version, not to an npm dist-tag. Servers that update
-themselves download that version's CLI archive from the GitHub Release; servers run through npm are
-handed a `t3@<version>` command to run. Every released client version must therefore have its
-release archives, and then its npm launcher, available before users can receive that client.
+Connected servers update to the client's exact fork version. Publish the corresponding
+server archives and `SHA256SUMS` together with the desktop artifacts, keeping the GitHub
+release in draft until all supported targets are ready. npm publication has no role in
+availability or installation. The server independently verifies the published release
+and destination archive before consulting its runtime cache or handing off to the launcher.
 
-The workflow enforces this ordering:
-
-1. `release` publishes the GitHub Release with the CLI archives and `SHA256SUMS`. Every channel
-   uploads to a draft and publishes only after all assets are attached, so a new version in the
-   desktop update feed already has its archives. **Update everything** relies on this to update
-   background-service hosts before npm has the version. Rerunning `release` after publication
-   replaces assets in a public release, so service updates can fail until the upload finishes.
-2. `publish_cli` publishes the `t3@<version>` launcher, which downloads from that release, on every
-   channel.
-3. `deploy_web` depends on both before moving the hosted channel to the new client.
-   `build_web` builds that client earlier with `vercel deploy --prod --skip-domain`, which
-   leaves the custom domains alone but moves the project's own `*.vercel.app` production
-   hostname. That hostname is behind Vercel SSO, so users only get the client through the
-   custom domains.
-
-Desktop auto-update reads the GitHub Release directly, so a desktop client can see the new version
-a few minutes before `t3@<version>` is on npm. Only the copied manual command for npm-run servers
-depends on npm, and it works once `publish_cli` finishes.
-
-Preserve these dependencies when changing the release graph. Publishing a client first would leave
-the **Update server** action targeting a package version that does not exist yet.
-
-For a release smoke test, confirm `npm view t3@<version> version` returns the expected version, then
-connect the new client to a server on the previous version and verify that the update action
-reconnects to the matching server. When the release adds database migrations, verify that the
-remote update applies them and reconnects. A failed trial must restore the database snapshot and
-restart the previous server. If the installed launcher does not support the target protocol,
-verify that the update stops before restart and run `npx t3@<version> service update` once on the
-server machine. Also test the manual or desktop-managed guidance when those environments are
-available.
+For a release smoke test, inspect the fork release assets, then connect the new client
+to a launcher-managed server on the previous fork version and verify that updating
+reconnects on the matching version. Also verify that an upstream-only target, a draft,
+and a release missing an archive cannot trigger a restart. When the release adds database
+migrations, verify that they apply and reconnect; a failed trial must restore the database
+snapshot and restart the previous server. If the installed launcher does not support the
+target protocol, the update must stop before restart. Download the target fork CLI and
+run its `t3 service update` locally to replace the launcher. Test desktop-managed hosts
+through their own desktop update feed as well.
 
 ## Desktop auto-update notes
 
@@ -470,9 +600,9 @@ available.
   - No automatic download or install.
   - The desktop UI shows a rocket update button when an update is available; click once to download, click again after download to restart/install.
 - Provider: GitHub Releases (`provider: github`) configured at build time.
-- Repository slug source:
-  - `T3CODE_DESKTOP_UPDATE_REPOSITORY` (format `owner/repo`), if set.
-  - otherwise `GITHUB_REPOSITORY` from GitHub Actions.
+- Repository: pinned to the shared fork release repository, `netpro2k/t3code`.
+  Ambient `T3CODE_DESKTOP_UPDATE_REPOSITORY` and `GITHUB_REPOSITORY` cannot select upstream.
+  Explicit mock-update builds still use the local generic test feed.
 - Required release assets for updater:
   - platform installers (`.exe`, `.dmg`, `.AppImage`, `.deb`, plus macOS `.zip` for Squirrel.Mac update payloads)
   - channel metadata: `latest*.yml` for stable releases, `nightly*.yml` for nightly releases

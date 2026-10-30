@@ -46,6 +46,19 @@ function machine(
 }
 
 describe("collectServerUpdateTargets", () => {
+  it("updates an attached primary boot service independently of the desktop package", () => {
+    const primary = machine("primary", "0.0.45-netpro2k.1", "boot-service", {
+      hostedByThisApp: true,
+    });
+    const { targets, skipped } = collectServerUpdateTargets([primary], "0.0.45-netpro2k.2", true);
+    expect(targets.map((target) => target.environmentId)).toEqual([primary.environmentId]);
+    expect(skipped).toEqual([]);
+    expect(collectRestartingMachines([primary], [], true)).toEqual([]);
+    expect(collectRestartingMachines([primary], targets, true)).toEqual([
+      { environmentId: primary.environmentId, continuesThreads: false },
+    ]);
+  });
+
   it("updates remote servers that can move to the target and names every skipped one", () => {
     const { targets, skipped } = collectServerUpdateTargets(
       [
@@ -242,7 +255,12 @@ describe("collectRestartingMachines", () => {
       overrides: Partial<UpdateEverythingMachine> = {},
       enabled = false,
     ) => {
-      const base = machine(id, "0.0.40", "boot-service", overrides);
+      const base = machine(
+        id,
+        "0.0.40",
+        overrides.hostedByThisApp ? "desktop-managed" : "boot-service",
+        overrides,
+      );
       return {
         ...base,
         serverConfig: {
