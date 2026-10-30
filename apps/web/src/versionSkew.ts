@@ -6,6 +6,7 @@ import type {
 } from "@t3tools/contracts";
 import type { ServerUpdateState } from "@t3tools/client-runtime/state/server";
 import { compareSemverVersions, parseSemver } from "@t3tools/shared/semver";
+import { isForkReleaseVersion } from "@t3tools/shared/cliRelease";
 import * as Schema from "effect/Schema";
 import { msg } from "gt-react";
 
@@ -59,14 +60,15 @@ export function resolveVersionMismatch(
 
   const clientCore = versionCore(normalizedClientVersion);
   const serverCore = versionCore(normalizedServerVersion);
-  const compareNightlyBuilds =
-    parseSemver(normalizedClientVersion)?.prerelease[0] === "nightly" &&
-    parseSemver(normalizedServerVersion)?.prerelease[0] === "nightly";
+  const clientTrain = parseSemver(normalizedClientVersion)?.prerelease[0];
+  const compareFullVersions =
+    (clientTrain === "nightly" || clientTrain === "netpro2k") &&
+    parseSemver(normalizedServerVersion)?.prerelease[0] === clientTrain;
   const serverIsBehind =
     parseSemver(clientCore) && parseSemver(serverCore)
       ? compareSemverVersions(
-          compareNightlyBuilds ? normalizedServerVersion : serverCore,
-          compareNightlyBuilds ? normalizedClientVersion : clientCore,
+          compareFullVersions ? normalizedServerVersion : serverCore,
+          compareFullVersions ? normalizedClientVersion : clientCore,
         ) < 0
       : normalizedServerVersion !== normalizedClientVersion;
   if (!serverIsBehind) {
@@ -106,13 +108,15 @@ export function manualServerUpdateCommand(
   installation?: ServerInstallation,
 ): string {
   const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
-  if (installation?.kind === "npm-global") {
-    return `npm install --global --prefix ${quote(installation.prefix)} t3@${targetVersion}`;
-  }
   if (installation?.kind === "t3-launcher") {
     // An inherited T3CODE_HOME would otherwise send the update to a home the launcher is not in.
     return `${quote(installation.launcher)} update --base-dir ${quote(installation.baseDir)} ${targetVersion}`;
   }
+  if (isForkReleaseVersion(targetVersion)) return `t3 update ${targetVersion}`;
+  if (installation?.kind === "npm-global") {
+    return `npm install --global --prefix ${quote(installation.prefix)} t3@${targetVersion}`;
+  }
+
   const runner =
     installation?.kind === "pnpm-dlx" ? "pnpm dlx" : installation?.kind === "bunx" ? "bunx" : "npx";
   return `${runner} t3@${targetVersion}`;

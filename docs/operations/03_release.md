@@ -1,5 +1,156 @@
 # Release Runbook
 
+## This fork: native builds and GitHub-hosted updates
+
+This fork uses `netpro2k/t3code` releases for desktop and server updates. npm and
+upstream publication do not make an update available. CI is optional: the release
+command builds on the Mac and Linux hosts and publishes through `gh`.
+
+Use `0.1.4-netpro2k` for the audited stack on upstream `v0.1.4`; additional builds
+use `.1`, `.2`, and so on. Never reuse a published version. Despite the SemVer
+suffix, these are regular GitHub releases marked latest, with `latest*.yml`
+manifests. GitHub prereleases are not the fork's stable update feed.
+
+### Build and publish
+
+Commit the audited patch stack, run `vp run check:changed`, and push the exact
+commit to the fork. Select the Node version pinned in that commit's root
+`package.json` on both build machines. Native builds need the same platform tools
+as the existing desktop builder, including Rust. macOS automatic updates need a
+consistent certificate signature. On Studio, set up the private local identity once:
+
+```sh
+bash scripts/fork-signing.sh setup
+source "$HOME/.config/t3code/signing/environment.sh"
+```
+
+Setup generates a 3072-bit RSA signing key and an independent random 256-bit unlock
+password using OpenSSL's cryptographic randomness. It verifies two different signed
+executables against the same designated certificate requirement. Private material
+stays outside the checkout in an owner-only directory: the keychain, encrypted
+PKCS#8 backup, and password files are never release assets. Keep a secure backup of
+that directory; recreating the certificate would require another manual Desktop
+installation. The release command unlocks only this dedicated keychain, with its
+password sent over stdin. It does not need access to the login keychain.
+
+`T3CODE_CLI_MAC_SIGN_IDENTITY` selects the same certificate for Desktop and the server
+archive, and `CSC_KEYCHAIN` selects its keychain. The packaged signature contains the
+public certificate and is checked against the configured fingerprint. For these
+personal builds, notarization and restricted passkey entitlements remain optional.
+To notarize with an Apple Developer ID certificate, provide `APPLE_API_KEY`,
+`APPLE_API_KEY_ID`, and `APPLE_API_ISSUER`. To enable restricted passkey entitlements,
+also configure the profile, team, and RP domains required by the desktop builder.
+Use absolute paths for keychain, API key and profile files. Do not commit private
+signing configuration or copy it into build staging.
+
+The builder carries only the public Clerk key, JWT template, CLI OAuth client ID,
+and relay URL from the checkout's environment files into the disposable worktree.
+Use the same public configuration on both hosts; publication checks its fingerprint
+as well as the source commit. Signing configuration comes from exported environment
+variables, not copied private configuration files.
+
+Linux builds need `patchelf` and the installed `libatomic.so.1` package. The archive
+bundles that library with its license and the package source reference from dpkg
+(Ubuntu) or pacman (Arch Linux).
+These private releases target oma and Studio. Fork Linux builds use the build
+host's glibc as their compatibility ceiling and retain the measured requirement
+in the build log and DEB dependency; non-fork builds keep upstream's 2.39 ceiling.
+
+Run this on each native host, passing the same exact commit and version:
+
+```sh
+node scripts/fork-release.ts build --version 0.1.4-netpro2k \
+  --ref <patched-commit-sha> --dir /absolute/path/t3-releases/0.1.4-netpro2k
+```
+
+The command uses a disposable worktree beside the checkout and leaves the working
+install alone. It builds the desktop (Mac DMG plus updater ZIP; Linux AppImage plus
+DEB), builds the standalone server archive, smoke-tests that archive against isolated
+state, and verifies the desktop manifest's version, sizes, and SHA-512 digests.
+Mac builds verify the packaged app's signature; notarized builds also pass Gatekeeper assessment. The
+output contains one directory per native target and a `build.json` receipt binding
+its assets to the source commit. Default release targets are `darwin-arm64` and
+`linux-x64`; an additional native Linux ARM64 build can be included with
+`--targets darwin-arm64,linux-x64,linux-arm64` on validation and publication.
+
+Copy the complete target directories into one release directory, preserving their
+receipts. Linux AppImages keep upstream's versionless filenames for in-place
+updates; the release tag and receipts identify the immutable candidate. With `gh`
+authenticated for write access to the fork:
+
+```sh
+node scripts/fork-release.ts validate --version 0.1.4-netpro2k --dir /path/to/release
+node scripts/fork-release.ts upload --version 0.1.4-netpro2k --dir /path/to/release \
+  --notes /path/to/release-notes.md
+node scripts/fork-release.ts publish --version 0.1.4-netpro2k --dir /path/to/release \
+  --notes /path/to/release-notes.md
+```
+
+`upload` creates or resumes a draft. `publish` can also do the entire upload in one
+command. Both require all selected targets from one commit, generate `SHA256SUMS`
+for the server archives, upload only recognized artifacts, and verify GitHub's
+asset digests before proceeding. A different existing asset is never overwritten;
+use a new revision instead. Debug configs, unpacked apps, credentials, and receipts
+are not uploaded. Publication makes the completed release available to clients;
+it does not force an installation on running machines.
+
+### One-time rollout from the source-run install
+
+The existing `update-mac.sh` and `update-linux.sh` build/install from the checkout.
+They do not publish releases, assign fork revisions, or install the service launcher
+needed by remote server updates. Do not use them to bootstrap the release channel.
+
+For the first rollout, prepare both published packages before stopping anything:
+
+1. Before launching Desktop with the new setup, turn **Local environment OFF** in
+   Settings → Connections. Download and verify the fork CLI archive against the
+   published `SHA256SUMS` and stage the matching desktop package. Preserve the current app and service files
+   for recovery, and arrange database backup while the service is stopped.
+2. Hand the cutover to an OS-owned process outside the running server, using the
+   existing detached-cutover helpers as the model. Quit Desktop, stop the exact
+   old service, and confirm its recorded PID has exited. On Mac, unload both the
+   fork's `com.netpro2k.t3code.server` job and any legacy
+   `com.t3tools.t3code.service` job before installing the launcher.
+3. Preserve the existing T3 home, provider PATH, and Tailscale HTTPS port 8443.
+   The launcher reads optional `<T3 home>/service.env`; configure
+   `T3CODE_TAILSCALE_SERVE=true` and `T3CODE_TAILSCALE_SERVE_PORT=8443` there.
+4. Install the released executable with `t3 service install --base-dir <T3 home>`,
+   and repoint the CLI shim to the release installation. The native service
+   installer uses `t3code.service` on Linux and `com.t3tools.t3code.service` on Mac.
+5. Install the signed Mac app in Applications and the Linux AppImage at its stable
+   writable path. Pair the background service as a saved connection using
+   `t3 pair --base-dir <T3 home>` and open its pairing URL in Desktop. Verify the
+   server advertises `serverSelfUpdate: boot-service`, both client and server report
+   the fork version, and Desktop connects to the service as a saved environment.
+
+Run the initial migration from raw Codex outside the server being replaced, or hand
+it to an OS-owned detached process. The source installers are not a release bootstrap.
+Saved connections use ordinary paired credentials. Re-pair with `t3 pair` when
+credentials expire. Desktop and the service must use the same T3 home for local
+Finder/reveal and editor actions. Browser tools use the server's Chromium stream;
+configure its separate browser profile and sign-ins as needed.
+
+### Subsequent updates
+
+Audit/rebase the patch stack onto the next exact official release, then repeat the
+native build and publish commands with a new fork version. A build coordinator,
+cron job, or T3 automation can invoke these commands; no GitHub Actions or npm
+publication is needed. Rebasing conflicts still require an audited resolution.
+
+Clients discover the new desktop release from the fork feed. Update Everything
+updates launcher-managed servers separately, waits for their restart, then installs
+and relaunches Desktop. The server independently rejects upstream-only targets,
+unpublished releases, or releases missing its archive/checksums before cache reuse
+or launcher handoff. The official mobile client remains unchanged and cannot force
+a standalone fork server onto an upstream build.
+
+Test the first upgrade from `0.1.4-netpro2k` to the next fork release on both machines:
+server handoff/reconnect, desktop replacement/relaunch, preserved local file actions,
+and rejection of an upstream-only server target. Repeat with `.1` to test a rebuild
+of the same upstream version. Keep Mac signing identity and app identity consistent.
+
+The sections below describe upstream's inherited stable/nightly workflow as reference.
+
 Unified release workflow: `.github/workflows/release.yml`. Beta is a product label, not a release channel—channels remain `stable` and `nightly` (plus `preview` for maintainer test builds).
 
 ## Channels and triggers

@@ -10,12 +10,14 @@ Click the **Update** button at the bottom of the sidebar (web or desktop) to upd
 - Confirmation dialogs show which machines are skipped (offline or manual-only) and how many active threads will pause/resume.
 - Choose **Later** on the desktop restart countdown to restart when ready.
 
-## Switch between Stable and Nightly
+Updates come from this fork's published releases. Background services wait for the
+matching fork server archive and checksums; npm and upstream releases do not make
+updates available. Each server checks that it can install the release before it
+restarts. If an update fails, the server keeps running and you can retry.
 
-In the desktop app, change **Settings → About → Update track** to switch connected machines together.
-
-- Moving a background service to an older Stable release requires running `t3 update --channel stable --allow-downgrade` on that host.
-- A switch is blocked if the machine's database has schema changes the target track doesn't support yet. macOS desktop apps must switch on that Mac.
+This fork stays on its own stable release channel. Stable/Nightly track switching
+is unavailable in fork builds. Organization policy can turn updates off; it does
+not change this fork's release feed.
 
 ## Continue threads after restarts
 
