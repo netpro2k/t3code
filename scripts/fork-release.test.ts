@@ -164,6 +164,7 @@ describe("fork release artifact validation", () => {
     const stateFile = NodePath.join(files.root, "github.json");
     const initial = {
       id: 42,
+      exists: false,
       draft: true,
       prerelease: false,
       target_commitish: commit,
@@ -183,9 +184,20 @@ const file = process.env.FAKE_RELEASE_STATE;
 const state = JSON.parse(fs.readFileSync(file, 'utf8'));
 if (args[0] === 'api' && args[1].includes('/commits/')) process.stdout.write(state.target_commitish);
 else if (args[0] === 'api' && args[1].includes('/git/matching-refs/')) process.stdout.write('');
-else if (args[0] === 'api' && args[1].includes('/releases?')) process.stdout.write(String(state.id));
-else if (args[0] === 'api' && args[1].endsWith('/releases/42')) process.stdout.write(JSON.stringify(state));
-else if (args[0] === 'release' && args[1] === 'list') process.stdout.write(JSON.stringify([{ tagName: 'v${version}', isDraft: state.draft, isPrerelease: false }]));
+else if (args[0] === 'api' && args.includes('POST')) {
+  const body = JSON.parse(fs.readFileSync(args[args.indexOf('--input') + 1], 'utf8'));
+  if (!body.draft || body.prerelease || body.target_commitish !== state.target_commitish) throw new Error('Invalid draft creation');
+  state.exists = true; state.justCreated = true;
+  fs.writeFileSync(file, JSON.stringify(state)); process.stdout.write(JSON.stringify(state));
+}
+else if (args[0] === 'api' && args[1].includes('/releases?')) process.stdout.write(state.justCreated ? '' : String(state.id));
+else if (args[0] === 'api' && args[1].endsWith('/releases/42')) {
+  state.justCreated = false; fs.writeFileSync(file, JSON.stringify(state)); process.stdout.write(JSON.stringify(state));
+}
+else if (args[0] === 'release' && args[1] === 'list') process.stdout.write(JSON.stringify(state.exists === false ? [] : [{ tagName: 'v${version}', isDraft: state.draft, isPrerelease: false }]));
+else if (args[0] === 'release' && args[1] === 'create') {
+  state.exists = true; state.justCreated = true; fs.writeFileSync(file, JSON.stringify(state));
+}
 else if (args[0] === 'release' && args[1] === 'upload') {
   const data = fs.readFileSync(args[3]);
   state.assets.push({ name: path.basename(args[3]), size: data.length, digest: 'sha256:' + crypto.createHash('sha256').update(data).digest('hex') });

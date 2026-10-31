@@ -468,22 +468,40 @@ async function publish(
     )
   )
     throw new Error("Use a new fork version newer than every published fork release.");
-  if (!releases.some((release) => release.tagName === tag))
-    gh([
-      "release",
-      "create",
-      tag,
-      "--repo",
-      CLI_RELEASE_REPOSITORY,
-      "--target",
-      commit,
-      "--draft",
-      "--prerelease=false",
-      "--title",
-      `T3 Code ${version}`,
-      "--notes-file",
-      NodePath.resolve(notes),
+  let releaseId: string;
+  if (!releases.some((release) => release.tagName === tag)) {
+    const requestDirectory = await NodeFSP.mkdtemp(
+      NodePath.join(NodeOS.tmpdir(), "t3-release-create-"),
+    );
+    try {
+      const input = NodePath.join(requestDirectory, "release.json");
+      await NodeFSP.writeFile(
+        input,
+        JSON.stringify({
+          tag_name: tag,
+          target_commitish: commit,
+          name: `T3 Code ${version}`,
+          body: await NodeFSP.readFile(NodePath.resolve(notes), "utf8"),
+          draft: true,
+          prerelease: false,
+        }),
+      );
+      releaseId = String(
+        decodeRelease(gh(["api", `${endpoint}/releases`, "--method", "POST", "--input", input])).id,
+      );
+    } finally {
+      await NodeFSP.rm(requestDirectory, { recursive: true, force: true });
+    }
+  } else {
+    // New drafts use the creation response; authenticated listing finds drafts on subsequent runs.
+    releaseId = gh([
+      "api",
+      `${endpoint}/releases?per_page=100`,
+      "--paginate",
+      "--jq",
+      `.[] | select(.tag_name == "${tag}") | .id`,
     ]);
+  }
   const existingTag = gh([
     "api",
     `${endpoint}/git/matching-refs/tags/${tag}`,
@@ -492,14 +510,6 @@ async function publish(
   ]);
   if (existingTag && gh(["api", `${endpoint}/commits/${tag}`, "--jq", ".sha"]) !== commit)
     throw new Error("The existing release tag points at a different source commit.");
-  // Drafts are located through the authenticated list; the tag endpoint is for published releases.
-  const releaseId = gh([
-    "api",
-    `${endpoint}/releases?per_page=100`,
-    "--paginate",
-    "--jq",
-    `.[] | select(.tag_name == "${tag}") | .id`,
-  ]);
   if (!/^\d+$/.test(releaseId)) throw new Error("Could not locate the unique draft release.");
   const readRelease = () => decodeRelease(gh(["api", `${endpoint}/releases/${releaseId}`]));
   let release = readRelease();
