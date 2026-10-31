@@ -649,7 +649,7 @@ export function parseHomebrewLatestVersion(
   return version === "latest" ? null : version;
 }
 
-const runProbe = Effect.fn("runProbe")(function* (
+export const runProbe = Effect.fn("runProbe")(function* (
   command: string,
   args: ReadonlyArray<string>,
   env: NodeJS.ProcessEnv,
@@ -1207,7 +1207,14 @@ const fetchNpmLatestVersion = Effect.fn("fetchNpmLatestVersion")(function* (pack
 function installerLatestVersionKey(capabilities: ProviderMaintenanceCapabilities) {
   const update = capabilities.update;
   return capabilities.lookupLatestVersion && update
-    ? [update.lockKey, update.executable, ...update.args].join("\0")
+    ? [
+        update.lockKey,
+        update.executable,
+        ...update.args,
+        ...(capabilities.latestVersionCacheKey === undefined
+          ? []
+          : [capabilities.latestVersionCacheKey]),
+      ].join("\0")
     : null;
 }
 
