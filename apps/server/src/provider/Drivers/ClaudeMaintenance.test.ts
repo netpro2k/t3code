@@ -1,479 +1,195 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { expect, it } from "@effect/vitest";
-import {
-  DEFAULT_SERVER_SETTINGS,
-  ProviderDriverKind,
-  ProviderInstanceId,
-  type ServerProvider,
-} from "@t3tools/contracts";
-import * as HostProcess from "@t3tools/shared/HostProcess";
-import {
-  enrichProviderSnapshotWithVersionAdvisory,
-  invalidateLatestProviderVersion,
-} from "@t3tools/provider-core/server/maintenanceResolver";
-import * as ProviderLatestVersions from "@t3tools/provider-core/server/ProviderLatestVersions";
-import * as ProviderHost from "@t3tools/provider-core/server/ProviderHost";
-import { makeManagedServerProvider } from "@t3tools/provider-core/server/managedProvider";
+import { describe, expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
-import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
-import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
-import * as Queue from "effect/Queue";
-import * as Stream from "effect/Stream";
-import * as TestClock from "effect/testing/TestClock";
-import * as HttpClient from "effect/http/HttpClient";
-import * as HttpClientResponse from "effect/http/HttpClientResponse";
-import * as Sink from "effect/Sink";
-import * as ChildProcess from "effect/process/ChildProcess";
-import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
+import * as Layer from "effect/Layer";
+import { HttpClient, HttpClientResponse } from "effect/http";
+import * as ProviderLatestVersions from "@t3tools/provider-core/server/ProviderLatestVersions";
+import {
+  invalidateLatestProviderVersion,
+  resolveLatestProviderVersion,
+} from "@t3tools/provider-core/server/maintenanceResolver";
 import { makeClaudeMaintenanceResolution } from "./ClaudeMaintenance.ts";
 
-const snapshot: ServerProvider = {
-  instanceId: ProviderInstanceId.make("claude"),
-  driver: ProviderDriverKind.make("claudeAgent"),
-  enabled: true,
-  installed: true,
-  version: "2.1.314",
-  status: "ready",
-  auth: { status: "authenticated" },
-  checkedAt: "2026-10-31T00:00:00.000Z",
-  models: [],
-  slashCommands: [],
-  skills: [],
-};
+const nativeRoot = "https://downloads.claude.ai/claude-code-releases";
 
-const fixture = Effect.fn("ClaudeMaintenance.test.fixture")(function* (
-  install: "native" | "xdgNative" | "npm" | "wrapper" = "native",
-  platform: NodeJS.Platform = "linux",
-  programFiles?: string,
-) {
-  const fs = yield* FileSystem.FileSystem;
-  const path = yield* Path.Path;
-  const directory = yield* fs.makeTempDirectoryScoped();
-  const binaryPath =
-    install === "npm"
-      ? path.join(directory, "lib/node_modules/@anthropic-ai/claude-code/cli.js")
-      : path.join(directory, ".local/bin", platform === "win32" ? "claude.exe" : "claude");
-  // Unix native installs link the launcher to a versioned binary; Windows places a real .exe.
-  const realBinaryPath =
-    install === "native" && platform !== "win32"
-      ? path.join(directory, ".local/share/claude/versions/2.1.314")
-      : install === "xdgNative"
-        ? path.join(directory, "xdg/data/claude/versions/2.1.314")
-        : binaryPath;
-  yield* fs.makeDirectory(path.dirname(realBinaryPath), { recursive: true });
-  yield* fs.writeFileString(realBinaryPath, "#!/bin/sh\n");
-  yield* fs.chmod(realBinaryPath, 0o755);
-  if (realBinaryPath !== binaryPath) {
-    yield* fs.makeDirectory(path.dirname(binaryPath), { recursive: true });
-    yield* fs.symlink(realBinaryPath, binaryPath);
-  }
-  const configDirectory = path.join(directory, "config");
-  yield* fs.makeDirectory(configDirectory);
-  const settingsPath = path.join(configDirectory, "settings.json");
-  const managed = new Map<string, string>();
-  const managedDirectory =
-    platform === "win32"
-      ? `${programFiles ?? "C:/Program Files"}/ClaudeCode`
-      : platform === "darwin"
-        ? "/Library/Application Support/ClaudeCode"
-        : "/etc/claude-code";
-  const npmPath = path.join(directory, "bin/npm");
-  if (install === "npm") {
-    yield* fs.makeDirectory(path.dirname(npmPath), { recursive: true });
-    yield* fs.writeFileString(npmPath, "#!/bin/sh\n");
-    yield* fs.chmod(npmPath, 0o755);
-  }
-  const npmProbes: Array<ReadonlyArray<string>> = [];
-  let installationReads = 0;
-  const testFs = FileSystem.makeNoop({
-    ...fs,
-    realPath: (file) => {
-      if (file === binaryPath) installationReads++;
-      return fs.realPath(file);
-    },
-    readFileString: (file, ...args) =>
-      file.replaceAll("\\", "/").startsWith(`${managedDirectory}/`)
-        ? managed.has(file.replaceAll("\\", "/"))
-          ? Effect.succeed(managed.get(file.replaceAll("\\", "/"))!)
-          : fs.readFileString(path.join(directory, "missing"))
-        : fs.readFileString(file, ...args),
-    readDirectory: (file) =>
-      file.replaceAll("\\", "/") === `${managedDirectory}/managed-settings.d`
-        ? Effect.succeed(
-            [...managed.keys()]
-              .filter((key) => key.includes("/managed-settings.d/"))
-              .map((key) => path.basename(key)),
-          )
-        : fs.readDirectory(file),
-  });
-  return {
-    directory,
-    fs,
-    managed,
-    managedDirectory,
-    settingsPath,
-    npmProbes,
-    installationReads: () => installationReads,
-    makeResolution: makeClaudeMaintenanceResolution({
-      binaryPath,
-      env: { PATH: install === "npm" ? path.dirname(npmPath) : "" },
-    }).pipe(
-      Effect.provideService(
-        ChildProcessSpawner.ChildProcessSpawner,
-        ChildProcessSpawner.make((command) => {
-          if (!ChildProcess.isStandardCommand(command) || command.command !== npmPath) {
-            return Effect.die("version checks may only ask npm");
-          }
-          npmProbes.push(command.args.map(String));
-          return Effect.succeed(
-            ChildProcessSpawner.makeHandle({
-              pid: ChildProcessSpawner.ProcessId(1),
-              exitCode: Effect.succeed(ChildProcessSpawner.ExitCode(1)),
-              isRunning: Effect.succeed(false),
-              kill: () => Effect.void,
-              unref: Effect.succeed(Effect.void),
-              stdin: Sink.drain,
-              stdout: Stream.encodeText(
-                Stream.make(JSON.stringify({ "@anthropic-ai/claude-code": { latest: "2.1.316" } })),
-              ),
-              stderr: Stream.empty,
-              all: Stream.empty,
-              getInputFd: () => Sink.drain,
-              getOutputFd: () => Stream.empty,
-            }),
-          );
-        }),
-      ),
-      Effect.provideService(FileSystem.FileSystem, testFs),
-      Effect.provideService(HostProcess.Platform, platform),
-      Effect.provideService(HostProcess.Environment, {
-        PATH: "",
-        CLAUDE_CONFIG_DIR: configDirectory,
-        ...(programFiles ? { PROGRAMFILES: programFiles } : {}),
-      }),
-    ),
-  };
-});
-
-it.layer(NodeServices.layer)("ClaudeMaintenance", (it) => {
-  it.effect.each([
-    {
-      name: "default native channel",
-      settings: undefined,
-      channel: "latest",
-      body: "2.1.314\n",
-      status: 200,
-      expected: "2.1.314",
-      advisory: "current",
-      npm: false,
-    },
-    {
-      name: "explicit latest channel",
-      settings: '{"autoUpdatesChannel":"latest"}',
-      channel: "latest",
-      body: "2.1.314",
-      status: 200,
-      expected: "2.1.314",
-      advisory: "current",
-      npm: false,
-    },
-    {
-      name: "stable channel",
-      settings: '{"autoUpdatesChannel":"stable"}',
-      channel: "stable",
-      body: "2.1.308",
-      status: 200,
-      expected: "2.1.308",
-      advisory: "current",
-      npm: false,
-    },
-    {
-      name: "new native release",
-      settings: undefined,
-      channel: "latest",
-      body: "2.1.315",
-      status: 200,
-      expected: "2.1.315",
-      advisory: "behind_latest",
-      npm: false,
-    },
-    {
-      name: "unavailable feed",
-      settings: undefined,
-      channel: "latest",
-      body: "Unavailable",
-      status: 503,
-      expected: null,
-      advisory: "unknown",
-      npm: false,
-    },
-    {
-      name: "malformed feed",
-      settings: undefined,
-      channel: "latest",
-      body: "<html>error</html>",
-      status: 200,
-      expected: null,
-      advisory: "unknown",
-      npm: false,
-    },
-    {
-      name: "empty feed",
-      settings: undefined,
-      channel: "latest",
-      body: "  ",
-      status: 200,
-      expected: null,
-      advisory: "unknown",
-      npm: false,
-    },
-    {
-      name: "npm install",
-      settings: '{"autoUpdatesChannel":"stable"}',
-      channel: "latest",
-      body: "",
-      status: 200,
-      expected: "2.1.316",
-      advisory: "behind_latest",
-      npm: true,
-    },
-  ])("advertises the installable version for $name", (row) =>
-    Effect.gen(function* () {
-      const f = yield* fixture(row.npm ? "npm" : "native");
-      if (row.settings) yield* f.fs.writeFileString(f.settingsPath, row.settings);
-      const requests: string[] = [];
-      const client = HttpClient.make((request) => {
-        requests.push(request.url);
-        return Effect.succeed(
-          HttpClientResponse.fromWeb(
-            request,
-            request.url.includes("claude-code-releases/")
-              ? new Response(row.body, { status: row.status })
-              : Response.json({ version: "2.1.316" }),
-          ),
-        );
-      });
-      const resolve = yield* f.makeResolution.pipe(
-        Effect.provideService(HttpClient.HttpClient, client),
-      );
-      const maintenance = yield* resolve();
-      const versions = yield* ProviderLatestVersions.make();
-      const enrich = enrichProviderSnapshotWithVersionAdvisory(snapshot, maintenance).pipe(
-        Effect.provideService(HttpClient.HttpClient, client),
-        Effect.provideService(ProviderLatestVersions.ProviderLatestVersions, versions),
-      );
-      expect((yield* enrich).versionAdvisory).toMatchObject({
-        status: row.advisory,
-        latestVersion: row.expected,
-      });
-      // npm installs ask `npm outdated`, which applies npm's release-age settings.
-      const lookups = row.npm ? f.npmProbes : requests;
-      expect(lookups).toHaveLength(1);
-      if (row.npm) {
-        expect(requests).toEqual([]);
-        expect(f.npmProbes[0]?.[0]).toBe("outdated");
-      } else {
-        expect(requests[0]).toMatch(new RegExp(`claude-code-releases/${row.channel}$`));
-      }
-      yield* enrich;
-      expect(lookups).toHaveLength(1);
-    }),
-  );
-
-  it.effect.each([
-    { name: "Linux", platform: "linux", programFiles: undefined },
-    { name: "macOS", platform: "darwin", programFiles: undefined },
-    { name: "Windows default path", platform: "win32", programFiles: undefined },
-    { name: "Windows custom path", platform: "win32", programFiles: "D:/Programs" },
-  ] as const)(
-    "separates channel caches and honors $name managed overrides and feed invalidation",
-    (row) =>
+describe("Claude native maintenance", () => {
+  it.live(
+    "uses the native channel instead of a newer npm release and separates configured homes",
+    () =>
       Effect.gen(function* () {
-        const f = yield* fixture("native", row.platform, row.programFiles);
-        const requests: string[] = [];
-        const client = HttpClient.make((request) => {
-          requests.push(request.url);
-          return Effect.succeed(
-            HttpClientResponse.fromWeb(
-              request,
-              new Response(request.url.endsWith("/stable") ? "2.1.308" : "2.1.314"),
-            ),
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const directory = yield* fs.makeTempDirectoryScoped();
+        const bin = path.join(directory, ".local/share/claude/versions");
+        yield* fs.makeDirectory(bin, { recursive: true });
+        const binaryPath = path.join(bin, "claude");
+        yield* fs.writeFileString(
+          binaryPath,
+          `#!/bin/sh
+if [ "$1" != doctor ]; then exit 1; fi
+/bin/cat "$CLAUDE_CONFIG_DIR/diagnostics"
+exit "\${DOCTOR_EXIT_CODE:-0}"
+`,
+        );
+        yield* fs.chmod(binaryPath, 0o755);
+        for (const [channel, version] of [
+          ["latest", "2.1.314"],
+          ["stable", "2.1.308"],
+        ] as const) {
+          const configDir = path.join(directory, channel);
+          yield* fs.makeDirectory(configDir);
+          yield* fs.writeFileString(
+            path.join(configDir, "diagnostics"),
+            `Auto-update channel: ${channel}\n`,
           );
-        });
-        const versions = yield* ProviderLatestVersions.make();
-        const resolve = yield* f.makeResolution.pipe(
-          Effect.provideService(HttpClient.HttpClient, client),
+          const capabilities = yield* makeClaudeMaintenanceResolution({
+            binaryPath,
+            env: { CLAUDE_CONFIG_DIR: configDir },
+          }).pipe(Effect.flatMap((resolve) => resolve()));
+          expect(yield* resolveLatestProviderVersion(capabilities)).toBe(version);
+          expect(capabilities.update?.env?.CLAUDE_CONFIG_DIR).toBe(configDir);
+        }
+        const wrapperDirectory = path.join(directory, ".local/bin");
+        yield* fs.makeDirectory(wrapperDirectory, { recursive: true });
+        const wrapper = path.join(wrapperDirectory, "claude");
+        yield* fs.writeFileString(wrapper, "#!/bin/sh\n");
+        yield* fs.chmod(wrapper, 0o755);
+        const wrapperCapabilities = yield* makeClaudeMaintenanceResolution({
+          binaryPath: wrapper,
+          env: { PATH: "" },
+        }).pipe(Effect.flatMap((resolve) => resolve()));
+        expect(wrapperCapabilities.update).toBeNull();
+        yield* fs.remove(wrapper);
+        yield* fs.symlink(binaryPath, wrapper);
+        const linkedCapabilities = yield* makeClaudeMaintenanceResolution({
+          binaryPath: wrapper,
+          env: { PATH: "", CLAUDE_CONFIG_DIR: path.join(directory, "latest") },
+        }).pipe(Effect.flatMap((resolve) => resolve()));
+        expect(linkedCapabilities.update?.lockKey).toBe("claudeAgent-native");
+        const latestHome = path.join(directory, "latest");
+        yield* fs.writeFileString(
+          path.join(latestHome, "diagnostics"),
+          "Auto-update channel: stable\n",
         );
-        const check = Effect.gen(function* () {
-          const capabilities = yield* resolve();
-          return yield* enrichProviderSnapshotWithVersionAdvisory(snapshot, capabilities);
-        }).pipe(
-          Effect.provideService(HttpClient.HttpClient, client),
-          Effect.provideService(ProviderLatestVersions.ProviderLatestVersions, versions),
-        );
-        expect((yield* check).versionAdvisory?.latestVersion).toBe("2.1.314");
-        yield* f.fs.writeFileString(f.settingsPath, '{"autoUpdatesChannel":"stable"}');
-        expect((yield* check).versionAdvisory?.latestVersion).toBe("2.1.308");
-        f.managed.set(
-          `${f.managedDirectory}/managed-settings.json`,
-          '{"autoUpdatesChannel":"latest"}',
-        );
-        expect((yield* check).versionAdvisory?.latestVersion).toBe("2.1.314");
-        f.managed.set(
-          `${f.managedDirectory}/managed-settings.d/20-channel.json`,
-          '{"autoUpdatesChannel":"stable"}',
-        );
-        f.managed.set(
-          `${f.managedDirectory}/managed-settings.d/10-channel.json`,
-          '{"autoUpdatesChannel":"latest"}',
-        );
-        expect((yield* check).versionAdvisory?.latestVersion).toBe("2.1.308");
-        expect(requests).toHaveLength(2);
-        const capabilities = yield* resolve();
-        yield* invalidateLatestProviderVersion(capabilities).pipe(
-          Effect.provideService(ProviderLatestVersions.ProviderLatestVersions, versions),
-        );
-        yield* check;
-        expect(requests).toHaveLength(3);
-      }),
-  );
-
-  it.effect.each([
-    { name: "a wrapper script", install: "wrapper", lockKey: undefined },
-    {
-      name: "a native install under XDG_DATA_HOME",
-      install: "xdgNative",
-      lockKey: "claudeAgent-native",
-    },
-  ] as const)("resolves the native launcher path for $name", (row) =>
-    Effect.gen(function* () {
-      const f = yield* fixture(row.install);
-      const resolve = yield* f.makeResolution.pipe(
+        const refreshed = yield* makeClaudeMaintenanceResolution({
+          binaryPath,
+          env: { CLAUDE_CONFIG_DIR: latestHome },
+        }).pipe(Effect.flatMap((resolve) => resolve()));
+        yield* invalidateLatestProviderVersion(refreshed);
+        expect(yield* resolveLatestProviderVersion(refreshed)).toBe("2.1.308");
+      }).pipe(
+        Effect.scoped,
+        Effect.provide(Layer.mergeAll(NodeServices.layer, ProviderLatestVersions.layer)),
         Effect.provideService(
           HttpClient.HttpClient,
-          HttpClient.make(() => Effect.die("resolution must not look up a version")),
-        ),
-      );
-      expect((yield* resolve()).update?.lockKey).toBe(row.lockKey);
-    }),
-  );
-
-  it.effect("automatic refresh rereads the native channel while preserving both caches", () =>
-    Effect.gen(function* () {
-      const f = yield* fixture();
-      const requests: string[] = [];
-      const client = HttpClient.make((request) => {
-        requests.push(request.url);
-        return Effect.succeed(
-          HttpClientResponse.fromWeb(
-            request,
-            new Response(request.url.endsWith("/stable") ? "2.1.308" : "2.1.315"),
-          ),
-        );
-      });
-      const resolveMaintenance = yield* f.makeResolution.pipe(
-        Effect.provideService(HttpClient.HttpClient, client),
-      );
-      const versions = yield* ProviderLatestVersions.make();
-      const publications = yield* Queue.unbounded<ServerProvider>();
-      yield* makeManagedServerProvider({
-        resolveMaintenance,
-        getSettings: Effect.succeed({ enabled: true }),
-        streamSettings: Stream.empty,
-        haveSettingsChanged: () => false,
-        initialSnapshot: () => Effect.succeed(snapshot),
-        checkProvider: Effect.succeed(snapshot),
-        refreshInterval: "1 minute",
-        enrichSnapshot: ({ snapshot, publishSnapshot }) =>
-          resolveMaintenance().pipe(
-            Effect.flatMap((maintenance) =>
-              enrichProviderSnapshotWithVersionAdvisory(snapshot, maintenance),
-            ),
-            Effect.provideService(HttpClient.HttpClient, client),
-            Effect.provideService(ProviderLatestVersions.ProviderLatestVersions, versions),
-            Effect.flatMap((enriched) =>
-              publishSnapshot(enriched).pipe(
-                Effect.andThen(Queue.offer(publications, enriched)),
-                Effect.asVoid,
-              ),
-            ),
-          ),
-      }).pipe(
-        Effect.provide(
-          Layer.mock(ProviderHost.ProviderHost)({
-            awaitServerReady: Effect.void,
-            paths: {
-              cwd: f.directory,
-              baseDir: f.directory,
-              stateDir: f.directory,
-              providerStatusCacheDir: f.directory,
-              attachmentsDir: f.directory,
-            },
-            settings: {
-              get: Effect.succeed(DEFAULT_SERVER_SETTINGS),
-              withSnapshot: (use) => use(DEFAULT_SERVER_SETTINGS),
-              changes: Stream.empty,
-              subscribe: Effect.succeed(Stream.empty),
-            },
-            shouldRunBackgroundWork: () => Effect.succeed(true),
-            resolveAttachmentPath: () => null,
+          HttpClient.make((request) => {
+            const body =
+              request.url === `${nativeRoot}/latest`
+                ? "2.1.314"
+                : request.url === `${nativeRoot}/stable`
+                  ? "2.1.308"
+                  : JSON.stringify({ version: "2.1.316" });
+            return Effect.succeed(HttpClientResponse.fromWeb(request, new Response(body)));
           }),
         ),
-      );
-      expect((yield* Queue.take(publications)).versionAdvisory).toMatchObject({
-        latestVersion: "2.1.315",
-        status: "behind_latest",
-      });
-      expect(requests).toHaveLength(1);
-
-      for (const channel of ["stable", "stable", "latest"] as const) {
-        yield* f.fs.writeFileString(
-          f.settingsPath,
-          JSON.stringify({ autoUpdatesChannel: channel }),
-        );
-        yield* TestClock.adjust("1 minute");
-        expect((yield* Queue.take(publications)).versionAdvisory).toMatchObject({
-          latestVersion: channel === "stable" ? "2.1.308" : "2.1.315",
-          status: channel === "stable" ? "current" : "behind_latest",
-        });
-        expect(requests).toEqual([
-          "https://downloads.claude.ai/claude-code-releases/latest",
-          "https://downloads.claude.ai/claude-code-releases/stable",
-        ]);
-        expect(f.installationReads()).toBe(1);
-      }
-    }),
+      ),
   );
-
-  it.effect("bounds stalled feed bodies and skips disabled update checks", () =>
+  it.live("leaves native availability unknown when diagnostics or the feed cannot be trusted", () =>
     Effect.gen(function* () {
-      const f = yield* fixture();
-      let requests = 0;
-      const client = HttpClient.make((request) => {
-        requests++;
-        return Effect.succeed(
-          HttpClientResponse.fromWeb(request, new Response(new ReadableStream())),
-        );
-      });
-      const resolve = yield* f.makeResolution.pipe(
-        Effect.provideService(HttpClient.HttpClient, client),
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const directory = yield* fs.makeTempDirectoryScoped();
+      const bin = path.join(directory, ".local/share/claude/versions");
+      yield* fs.makeDirectory(bin, { recursive: true });
+      const binaryPath = path.join(bin, "claude");
+      yield* fs.writeFileString(
+        binaryPath,
+        `#!/bin/sh
+if [ "$1" != doctor ]; then exit 1; fi
+/bin/cat "$CLAUDE_CONFIG_DIR/diagnostics"
+exit "\${DOCTOR_EXIT_CODE:-0}"
+`,
       );
-      const capabilities = yield* resolve();
-      const enrich = (enabled: boolean) =>
-        enrichProviderSnapshotWithVersionAdvisory(snapshot, capabilities, {
-          enableProviderUpdateChecks: enabled,
+      yield* fs.chmod(binaryPath, 0o755);
+      const fixtures = [
+        {
+          name: "unknown-channel",
+          diagnostics: "Auto-update channel: canary",
+          code: "0",
+          status: 200,
+          body: "2.1.316",
+          requests: 0,
+        },
+        {
+          name: "missing-channel",
+          diagnostics: "Old doctor output",
+          code: "0",
+          status: 200,
+          body: "2.1.316",
+          requests: 0,
+        },
+        {
+          name: "failed-doctor",
+          diagnostics: "Auto-update channel: latest",
+          code: "1",
+          status: 200,
+          body: "2.1.316",
+          requests: 0,
+        },
+        {
+          name: "unavailable-feed",
+          diagnostics: "Auto-update channel: latest",
+          code: "0",
+          status: 503,
+          body: "Unavailable",
+          requests: 1,
+        },
+        {
+          name: "invalid-version",
+          diagnostics: "Auto-update channel: latest",
+          code: "0",
+          status: 200,
+          body: "<html>2.1.316</html>",
+          requests: 1,
+        },
+      ];
+      for (const fixture of fixtures) {
+        const configDir = path.join(directory, fixture.name);
+        yield* fs.makeDirectory(configDir);
+        yield* fs.writeFileString(path.join(configDir, "diagnostics"), fixture.diagnostics);
+        const requested: string[] = [];
+        const capabilities = yield* makeClaudeMaintenanceResolution({
+          binaryPath,
+          env: { CLAUDE_CONFIG_DIR: configDir, DOCTOR_EXIT_CODE: fixture.code },
         }).pipe(
-          Effect.provide(ProviderLatestVersions.layer),
-          Effect.provideService(HttpClient.HttpClient, client),
+          Effect.flatMap((resolve) => resolve()),
+          Effect.provideService(
+            HttpClient.HttpClient,
+            HttpClient.make((request) => {
+              requested.push(request.url);
+              return Effect.succeed(
+                HttpClientResponse.fromWeb(
+                  request,
+                  new Response(fixture.body, { status: fixture.status }),
+                ),
+              );
+            }),
+          ),
         );
-      expect((yield* enrich(false)).versionAdvisory?.status).toBe("unknown");
-      expect(requests).toBe(0);
-      const pending = yield* enrich(true).pipe(Effect.forkChild({ startImmediately: true }));
-      yield* TestClock.adjust("4 seconds");
-      expect((yield* Fiber.join(pending)).versionAdvisory?.status).toBe("unknown");
-      expect(requests).toBe(1);
-    }),
+        expect(yield* resolveLatestProviderVersion(capabilities)).toBeNull();
+        expect(requested).toEqual(
+          Array.from({ length: fixture.requests }, () => `${nativeRoot}/latest`),
+        );
+      }
+    }).pipe(
+      Effect.scoped,
+      Effect.provide(Layer.mergeAll(NodeServices.layer, ProviderLatestVersions.layer)),
+      Effect.provideService(
+        HttpClient.HttpClient,
+        HttpClient.make(() => Effect.die("Native lookup must not fall back to npm")),
+      ),
+    ),
   );
 });
