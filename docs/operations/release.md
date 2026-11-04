@@ -129,10 +129,19 @@ configure its separate browser profile and sign-ins as needed.
 
 ### Subsequent updates
 
-Audit/rebase the patch stack onto the next exact official release, then repeat the
-native build and publish commands with a new fork version. A build coordinator,
-cron job, or T3 automation can invoke these commands; no GitHub Actions or npm
-publication is needed. Rebasing conflicts still require an audited resolution.
+The nightly T3 task uses [prepare-fork-release](../../.agents/skills/prepare-fork-release/SKILL.md)
+to check the latest published upstream stable release, audit/rebase in its own
+worktree, and prepare both native builds as a draft. One durable claim under the
+shared Git directory prevents overlapping candidates, including while a draft
+awaits approval. No-update runs archive themselves; ready drafts and failures stay
+visible in pinned threads. Later runs remove recorded clean worktrees only after
+their threads are archived and stopped.
+
+Approval publishes the exact verified draft and replaces `main` with its audited
+commit using an exact force-with-lease. It does not merge the old patch history,
+rebase again, or install into running clients/servers. Keep build receipts and
+artifacts until publication. The same skill can resume interrupted preparation or
+publication; ambiguous rebase decisions still require the user.
 
 Clients discover the new desktop release from the fork feed. Update Everything
 updates launcher-managed servers separately, waits for their restart, then installs
