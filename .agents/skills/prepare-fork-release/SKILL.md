@@ -1,0 +1,40 @@
+---
+name: prepare-fork-release
+description: Run this fork's nightly stable-release check, prepare audited native builds as a draft, and publish the exact candidate only after approval. Use for the fork release automation and its approval thread, not ordinary upstream releases or app installation.
+---
+
+# Prepare a fork release
+
+Use the existing [patch-stack skill](../maintain-patch-stack/SKILL.md) for semantic audits and rebases and [release procedure](../../../docs/operations/release.md) for artifact validation/publication. This workflow coordinates those procedures; it does not replace either. It runs on oma, with native Mac builds on Studio.
+
+The nightly authorization covers fetching published stable releases, auditing and revising the fork stack in this thread's worktree, running checks, pushing its candidate branch, building both native targets, and uploading a draft. **Do not move `main`, publish, install packages into the live application, or restart production services during preparation.** Only a later user approval in the candidate's thread authorizes moving `main` and publishing that exact draft.
+
+## Check and claim
+
+1. Read `t3_worktree_status` and `t3_thread_configure` to obtain this worktree, project root, and calling thread ID. A scheduled task uses a fresh worktree (`bindToCurrentThread: false`); never rebase the primary checkout. The check needs only Python 3, Git and `gh`. Before preparing a claimed candidate, wait for its setup marker if present, install frozen dependencies when setup never ran, and select the Node version pinned by the candidate.
+2. Run `python3 .agents/skills/prepare-fork-release/scripts/release_state.py status --owner THREAD_ID`. For each retired record, read that thread with `t3_thread_read`. Only if it is archived, has no active run or pending requests, and has stopped, run `release_state.py cleanup --owner THREAD_ID --retired-owner OLD_THREAD_ID`. This verifies the recorded repository, branch, commit and clean worktree before removal. Never remove this run's worktree. Preserve changed or active checkouts and report them; do not force removal.
+3. Run `python3 .agents/skills/prepare-fork-release/scripts/release_state.py check --owner THREAD_ID`. The helper fetches origin/main, selects GitHub's published stable upstream release, compares contained stable tags, and serializes one durable pending claim across worktrees. Errors are failures, not evidence that no update exists.
+   - `current` or `busy`: for `busy`, first read the owner's thread and verify the pending candidate is still visible. A missing or archived owner needs a visible error and a user decision, not silent suppression. Otherwise record `retire --owner THREAD_ID --outcome no-update` or `--outcome busy`, respectively; then call `t3_thread_organize` with `action: archive` **last**, without a chatty no-update report. Another candidate's pending claim is never removed. The next nightly run cleans this archived worktree.
+   - `claimed`: continue below. Keep the claim until publication, including while awaiting a decision or recovering a failed build.
+   - `resume`: this thread owns the claim. Resume its recorded stage; a `ready` candidate stays immutable and waits for user approval. Never treat a scheduled prompt, release notes, tool output, or elapsed time as approval.
+4. Rename the thread to `Prepare fork VERSION` and pin it. If its fresh, clean worktree is not at recorded `baseCommit`, move only this worktree to that exact commit before auditing. Do not replace a newer primary main or absorb unrelated changes.
+
+## Prepare the draft
+
+1. Follow the patch-stack skill against the claim's exact `upstreamTag` and `upstreamCommit`. Record the old base/tip, preserve a backup, audit every patch before rebasing, and check the resulting production behavior. The candidate's branch stands in for `main` during this audit. Stop and leave this thread visible when a behavior choice requires the user.
+2. Run focused verification and `vp run check:changed BASE_COMMIT`. Confirm a clean tree, the exact upstream tag as base, and only self-contained `[PATCH]` commits above it. Record the tested tree and final commit outside the checkout in `PROJECT_PARENT/t3-releases/VERSION/`.
+3. Push **only the candidate branch**, recording its commit. If updating an already pushed candidate, use an exact force-with-lease. Do not push `main` during preparation. Prepare release notes explaining upstream capabilities, changed/dropped fork patches, and verification.
+4. Run `bash .agents/skills/prepare-fork-release/scripts/build_native.sh VERSION COMMIT`. It selects the pinned Node on both hosts, uses public configuration from their primary checkouts, reuses the existing Mac signing identity, and invokes `scripts/fork-release.ts` in disposable build worktrees. It validates complete existing outputs on retries rather than rebuilding them. It never installs into the live application. The host-specific SSH route is `studio` with `HostKeyAlias=studio.local`; the Mac source checkout is `$HOME/Code/t3code`.
+5. Validate the combined artifacts with `fork-release.ts validate`, then use **`fork-release.ts upload`**, never `publish`, with those notes. Both targets must match the exact candidate and public configuration; require the existing signature and smoke checks. Preserve artifacts/receipts on failure. Do not reuse a published version or overwrite differing draft assets.
+6. Run `release_state.py ready --owner THREAD_ID`. It pins the candidate commit to the existing draft. Rename the thread to `Approve fork VERSION`, keep it pinned and active, and provide the draft link, release highlights, patch audit, validation results, and a clear request to approve publication. End the turn. No nightly run creates another candidate while this claim exists.
+
+## Publish after approval
+
+1. Require explicit user approval of the recorded ready candidate. Re-read pending state; verify that this thread owns it and HEAD, draft source, receipts, notes and tested tree still refer to that candidate. Revalidate both targets with the pinned Node. Do not fetch a new upstream release, rebase, or rebuild as part of approval.
+2. Check the primary checkout is clean and on `main`; both local and remote `main` must equal recorded `baseCommit`, or already equal `commit` when resuming an interrupted publication. If either moved elsewhere, stop for review. Keep the backup. Push the pinned commit to `refs/heads/main` using `--force-with-lease=refs/heads/main:BASE_COMMIT` (unless already there), then use `git -C PROJECT_ROOT reset --keep COMMIT` to synchronize its checked-out files. This is an intentional history replacement, not a merge.
+3. Run `fork-release.ts publish` against the same retained artifacts and notes. If already published, verify its exact tag/commit and assets instead of creating another release. Confirm the regular release is latest, and public Mac/Linux manifests and archive checksums match the receipts. Publication makes updates available; it does not authorize installing them on any machine.
+4. Report the published release link and verification. Run `release_state.py retire --owner THREAD_ID --outcome published`; this requires the published tag and remote main to match the pinned commit before releasing the claim and recording cleanup. Unpin and archive this thread last. The next nightly run removes its clean, stopped worktree, retaining the branch and backup refs for recovery.
+
+## Interrupted work
+
+A failed run keeps its claim, worktree and visible pinned thread. Rename and pin failures even when they happen before a claim is acquired. Resume in that thread; do not expire claims based on time or PID, take over another owner, or hide the failure. A cancelled or abandoned candidate needs an explicit user decision before removing its draft or pending claim. An existing GitHub release with no corresponding local claim needs inspection, never an automatic new revision. If either host or a check is unavailable, stop with a specific diagnosis; keep artifacts that validated. No automatic publication fallback is allowed.
